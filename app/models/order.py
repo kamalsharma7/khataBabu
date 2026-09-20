@@ -92,6 +92,7 @@ class PosOrder(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    table_label_snapshot: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, name="order_status", native_enum=False),
         nullable=False,
@@ -110,6 +111,17 @@ class PosOrder(Base, TimestampMixin):
     settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_reason: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    time_session_start: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    time_session_end: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    time_billed_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hourly_rate_snapshot: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    time_charge: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
 
     outlet: Mapped["Outlet"] = relationship(back_populates="pos_orders")
     venue_table: Mapped[Optional["VenueTable"]] = relationship(back_populates="pos_orders")
@@ -136,11 +148,12 @@ class PosOrderLine(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    menu_item_id: Mapped[uuid.UUID] = mapped_column(
+    menu_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("menu_items.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
+    is_open_item: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     menu_item_variation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("menu_item_variations.id", ondelete="SET NULL"),

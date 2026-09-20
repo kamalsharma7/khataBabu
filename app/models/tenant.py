@@ -56,6 +56,7 @@ class Business(Base, TimestampMixin):
         ForeignKey("platform_admins.id", ondelete="SET NULL"),
         nullable=True,
     )
+    analytics_pin_hash: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     outlets: Mapped[list["Outlet"]] = relationship(back_populates="business", cascade="all, delete-orphan")
     owners: Mapped[list["BusinessOwner"]] = relationship(

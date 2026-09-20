@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import enum
 import uuid
+from datetime import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String, Time, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +19,11 @@ if TYPE_CHECKING:
 
 class ResourceKind(str, enum.Enum):
     DINE_TABLE = "dine_table"
+    TIME_BASED = "time_based"
+
+
+class AreaBillingMode(str, enum.Enum):
+    DINE_IN = "dine_in"
     TIME_BASED = "time_based"
 
 
@@ -42,6 +48,19 @@ class VenueArea(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    billing_mode: Mapped[AreaBillingMode] = mapped_column(
+        Enum(
+            AreaBillingMode,
+            name="area_billing_mode",
+            native_enum=False,
+            values_callable=lambda choices: [c.value for c in choices],
+        ),
+        nullable=False,
+        default=AreaBillingMode.DINE_IN,
+    )
+    operating_start: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    operating_end: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    hourly_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
 
     outlet: Mapped["Outlet"] = relationship(back_populates="areas")
     tables: Mapped[list["VenueTable"]] = relationship(
@@ -76,7 +95,12 @@ class VenueTable(Base, TimestampMixin):
     label: Mapped[str] = mapped_column(String(64), nullable=False)
     capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resource_kind: Mapped[ResourceKind] = mapped_column(
-        Enum(ResourceKind, name="resource_kind", native_enum=False),
+        Enum(
+            ResourceKind,
+            name="resource_kind",
+            native_enum=False,
+            values_callable=lambda choices: [c.value for c in choices],
+        ),
         nullable=False,
         default=ResourceKind.DINE_TABLE,
     )

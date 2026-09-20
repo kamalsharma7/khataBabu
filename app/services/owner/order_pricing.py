@@ -8,14 +8,29 @@ from app.models.order import PosOrder, PosOrderLine
 MONEY = Decimal("0.01")
 
 
-def money(value: Decimal | int | float | str) -> Decimal:
-    if not isinstance(value, Decimal):
+def money(value: Decimal | int | float | str | None) -> Decimal:
+    if value is None:
+        value = Decimal("0")
+    elif not isinstance(value, Decimal):
         value = Decimal(str(value))
     return value.quantize(MONEY)
 
 
+def compute_time_charge(minutes: int, hourly_rate: Decimal) -> Decimal:
+    if minutes <= 0 or hourly_rate <= 0:
+        return Decimal("0")
+    return money(Decimal(minutes) * hourly_rate / Decimal("60"))
+
+
 def order_subtotal(order: PosOrder) -> Decimal:
-    return subtotal_from_lines(order.lines)
+    return order_effective_subtotal(order)
+
+
+def order_effective_subtotal(order: PosOrder, lines: list[PosOrderLine] | None = None) -> Decimal:
+    source = lines if lines is not None else order.lines
+    base = subtotal_from_lines(source)
+    charge = order.time_charge if order.time_charge is not None else Decimal("0")
+    return money(base + charge)
 
 
 def subtotal_from_lines(lines: list[PosOrderLine]) -> Decimal:

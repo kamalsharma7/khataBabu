@@ -122,3 +122,37 @@ def decode_owner_access_token(settings: Settings, token: str) -> dict[str, Any]:
         audience=settings.owner_jwt_audience,
         options={"require": ["exp", "iat", "sub", "aud", "type", "business_id"]},
     )
+
+
+def create_owner_analytics_token(
+    settings: Settings,
+    owner_id: UUID,
+    business_id: UUID,
+    outlet_id: UUID,
+) -> str:
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=settings.owner_analytics_token_expire_minutes)
+    payload: dict[str, Any] = {
+        "sub": str(owner_id),
+        "business_id": str(business_id),
+        "outlet_id": str(outlet_id),
+        "aud": settings.owner_jwt_audience,
+        "type": "owner_analytics",
+        "iat": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+    }
+    return jwt.encode(
+        payload,
+        settings.owner_jwt_secret,
+        algorithm=settings.owner_jwt_algorithm,
+    )
+
+
+def decode_owner_analytics_token(settings: Settings, token: str) -> dict[str, Any]:
+    return jwt.decode(
+        token,
+        settings.owner_jwt_secret,
+        algorithms=[settings.owner_jwt_algorithm],
+        audience=settings.owner_jwt_audience,
+        options={"require": ["exp", "iat", "sub", "aud", "type", "business_id", "outlet_id"]},
+    )

@@ -202,6 +202,7 @@ class OwnerMenuService:
         if payload.description is not None:
             item.description = payload.description
         if payload.price is not None:
+            # Open orders keep line unit_price; settled bills use stored line_total / bill totals.
             item.price = payload.price
         if payload.short_code is not None:
             item.short_code = payload.short_code

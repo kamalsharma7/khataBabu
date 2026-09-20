@@ -12,6 +12,7 @@ from app.models.enums import BillStatus, OrderStatus
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.order import (
     AddBillPaymentRequest,
+    BillDetailResponse,
     BillListEntryResponse,
     BillPreviewRequest,
     BillResponse,
@@ -19,6 +20,7 @@ from app.schemas.owner.order import (
     KotResponse,
     OrderCancel,
     OrderCreate,
+    OpenOrderLineCreate,
     OrderLineCreate,
     OrderLineUpdate,
     OrderResponse,
@@ -55,6 +57,17 @@ async def list_bills(
 ) -> list[BillListEntryResponse]:
     service = OwnerOrderService(db)
     return await service.list_bills(owner, outlet_id, bill_status, limit)
+
+
+@router.get("/bills/{bill_id}/detail", response_model=BillDetailResponse)
+async def get_bill_detail(
+    outlet_id: uuid.UUID,
+    bill_id: uuid.UUID,
+    owner: BusinessOwner = Depends(get_current_owner),
+    db: AsyncSession = Depends(get_db),
+) -> BillDetailResponse:
+    service = OwnerOrderService(db)
+    return await service.get_bill_detail(owner, outlet_id, bill_id)
 
 
 @router.get("/floor", response_model=FloorStatusResponse)
@@ -146,6 +159,18 @@ async def add_order_line(
 ) -> OrderResponse:
     service = OwnerOrderService(db)
     return await service.add_line(owner, outlet_id, order_id, body)
+
+
+@router.post("/orders/{order_id}/open-lines", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+async def add_open_order_line(
+    outlet_id: uuid.UUID,
+    order_id: uuid.UUID,
+    body: OpenOrderLineCreate,
+    owner: BusinessOwner = Depends(get_current_owner),
+    db: AsyncSession = Depends(get_db),
+) -> OrderResponse:
+    service = OwnerOrderService(db)
+    return await service.add_open_line(owner, outlet_id, order_id, body)
 
 
 @router.patch("/orders/{order_id}/lines/{line_id}", response_model=OrderResponse)

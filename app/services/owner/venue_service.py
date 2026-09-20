@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import time as dt_time
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -8,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant import BusinessOwner
-from app.models.venue import ResourceKind, VenueArea, VenueTable
+from app.models.venue import AreaBillingMode, ResourceKind, VenueArea, VenueTable
 from app.schemas.owner.venue import AreaCreate, AreaUpdate, TableBulkCreate, TableCreate, TableUpdate
 from app.services.owner.access import assert_business_operational, get_outlet_for_owner
 
@@ -16,6 +17,26 @@ from app.services.owner.access import assert_business_operational, get_outlet_fo
 def _table_labels(prefix: str, count: int, start_number: int) -> list[str]:
     label_prefix = prefix.strip() or "Table"
     return [f"{label_prefix} {start_number + i}" for i in range(count)]
+
+
+def _parse_hhmm(value: str) -> dt_time:
+    hour, minute = (int(p) for p in value.split(":"))
+    return dt_time(hour=hour, minute=minute)
+
+
+def _validate_time_area_state(area: VenueArea) -> None:
+    if area.billing_mode != AreaBillingMode.TIME_BASED:
+        return
+    if area.hourly_rate is None or area.hourly_rate <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="hourly_rate is required for time-based areas",
+        )
+    if area.operating_start is None or area.operating_end is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="operating_start and operating_end are required for time-based areas",
+        )
 
 
 class OwnerVenueService:
@@ -43,8 +64,13 @@ class OwnerVenueService:
             outlet_id=outlet_id,
             name=payload.name.strip(),
             sort_order=payload.sort_order,
+            billing_mode=payload.billing_mode,
+            operating_start=_parse_hhmm(payload.operating_start) if payload.operating_start else None,
+            operating_end=_parse_hhmm(payload.operating_end) if payload.operating_end else None,
+            hourly_rate=payload.hourly_rate,
         )
         self.db.add(area)
+        _validate_time_area_state(area)
         try:
             await self.db.flush()
             if payload.initial_table_count and payload.initial_table_count > 0:
@@ -56,6 +82,7 @@ class OwnerVenueService:
                         payload.initial_table_count,
                         start_number=1,
                     ),
+                    area=area,
                 )
             await self.db.commit()
         except IntegrityError:
@@ -80,6 +107,15 @@ class OwnerVenueService:
             area.name = payload.name.strip()
         if payload.sort_order is not None:
             area.sort_order = payload.sort_order
+        if payload.billing_mode is not None:
+            area.billing_mode = payload.billing_mode
+        if payload.operating_start is not None:
+            area.operating_start = _parse_hhmm(payload.operating_start)
+        if payload.operating_end is not None:
+            area.operating_end = _parse_hhmm(payload.operating_end)
+        if payload.hourly_rate is not None:
+            area.hourly_rate = payload.hourly_rate
+        _validate_time_area_state(area)
         await self.db.commit()
         await self.db.refresh(area)
         return area
@@ -117,8 +153,11 @@ class OwnerVenueService:
         payload: TableCreate,
     ) -> VenueTable:
         assert_business_operational(owner.business)
-        await self._get_area(owner, outlet_id, area_id)
-        if payload.resource_kind == ResourceKind.TIME_BASED and payload.hourly_rate is None:
+        area = await self._get_area(owner, outlet_id, area_id)
+        hourly = payload.hourly_rate
+        if payload.resource_kind == ResourceKind.TIME_BASED and hourly is None:
+            hourly = area.hourly_rate
+        if payload.resource_kind == ResourceKind.TIME_BASED and hourly is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="hourly_rate is required for time-based resources",
@@ -129,7 +168,7 @@ class OwnerVenueService:
             label=payload.label.strip(),
             capacity=payload.capacity,
             resource_kind=payload.resource_kind,
-            hourly_rate=payload.hourly_rate,
+            hourly_rate=hourly,
             sort_order=payload.sort_order,
         )
         self.db.add(table)
@@ -152,9 +191,9 @@ class OwnerVenueService:
         payload: TableBulkCreate,
     ) -> list[VenueTable]:
         assert_business_operational(owner.business)
-        await self._get_area(owner, outlet_id, area_id)
+        area = await self._get_area(owner, outlet_id, area_id)
         labels = _table_labels(payload.table_label_prefix, payload.count, payload.start_number)
-        tables = self._add_tables(outlet_id=outlet_id, area_id=area_id, labels=labels)
+        tables = self._add_tables(outlet_id=outlet_id, area_id=area_id, labels=labels, area=area)
         try:
             await self.db.commit()
         except Exception:
@@ -172,14 +211,18 @@ class OwnerVenueService:
         outlet_id: uuid.UUID,
         area_id: uuid.UUID,
         labels: list[str],
+        area: VenueArea | None = None,
     ) -> list[VenueTable]:
         created: list[VenueTable] = []
+        kind = ResourceKind.TIME_BASED if area and area.billing_mode == AreaBillingMode.TIME_BASED else ResourceKind.DINE_TABLE
+        hourly = area.hourly_rate if area and area.billing_mode == AreaBillingMode.TIME_BASED else None
         for sort_order, label in enumerate(labels):
             table = VenueTable(
                 outlet_id=outlet_id,
                 area_id=area_id,
                 label=label,
-                resource_kind=ResourceKind.DINE_TABLE,
+                resource_kind=kind,
+                hourly_rate=hourly,
                 sort_order=sort_order,
             )
             self.db.add(table)

@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = False
+    log_file: str = "logs/kblogs.log"
+    log_to_console: bool = True
     log_request_id_header: str = "X-Request-ID"
 
     database_url: Optional[str] = None
@@ -81,6 +83,7 @@ class Settings(BaseSettings):
     owner_jwt_algorithm: str = "HS256"
     owner_jwt_audience: str = "khatababu-owner"
     owner_access_token_expire_minutes: int = 1440  # 24 hours
+    owner_analytics_token_expire_minutes: int = 45
 
     @field_validator("cors_origins", mode="before")
     @classmethod

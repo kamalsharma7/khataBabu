@@ -80,7 +80,7 @@ Point the app at any environment by changing `.env` or process env — no code c
 | Pool / perf | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE` |
 | Redis | `REDIS_ENABLED=true`, `REDIS_URL` |
 | Kafka | `KAFKA_ENABLED=true`, `KAFKA_BOOTSTRAP_SERVERS` (e.g. `localhost:19092` with compose Redpanda) |
-| Logging | `LOG_LEVEL`, `LOG_JSON=true` in production |
+| Logging | `LOG_LEVEL`, `LOG_FILE=logs/kblogs.log` (single file for all backend logs), `LOG_JSON=true` in production, `LOG_TO_CONSOLE=false` to file-only |
 
 Example production database URL:
 

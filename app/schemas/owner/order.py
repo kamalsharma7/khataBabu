@@ -32,6 +32,17 @@ class OrderUpdate(BaseModel):
     customer_mobile: Optional[str] = Field(default=None, max_length=20)
     pay_later: Optional[bool] = None
     notes: Optional[str] = Field(default=None, max_length=512)
+    time_duration_minutes: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1440,
+        description="Session length in minutes (used with start anchor or now)",
+    )
+    time_start_now: Optional[bool] = None
+    time_end_now: Optional[bool] = None
+    time_session_start: Optional[datetime] = None
+    time_session_end: Optional[datetime] = None
+    clear_time_session: Optional[bool] = None
 
 
 class OrderCancel(BaseModel):
@@ -50,9 +61,21 @@ class OrderLineCreate(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=512)
 
 
+class OpenOrderLineCreate(BaseModel):
+    description: str = Field(min_length=1, max_length=255)
+    unit_price: Decimal = Field(gt=0)
+    quantity: int = Field(default=1, ge=1, le=99)
+    notes: Optional[str] = Field(default=None, max_length=512)
+    menu_item_id: Optional[UUID] = Field(
+        default=None,
+        description="Optional menu item to link for reporting (price still uses unit_price)",
+    )
+
+
 class OrderLineUpdate(BaseModel):
     quantity: Optional[int] = Field(default=None, ge=1, le=99)
     notes: Optional[str] = Field(default=None, max_length=512)
+    unit_price: Optional[Decimal] = Field(default=None, gt=0)
 
 
 class SendKotRequest(BaseModel):
@@ -111,7 +134,8 @@ class OrderLineAddonResponse(BaseModel):
 
 class OrderLineResponse(BaseModel):
     id: UUID
-    menu_item_id: UUID
+    menu_item_id: Optional[UUID] = None
+    is_open_item: bool = False
     menu_item_variation_id: Optional[UUID]
     item_name: str
     variation_name: Optional[str]
@@ -186,6 +210,23 @@ class BillListEntryResponse(BillResponse):
     customer_name: Optional[str] = None
 
 
+class BillDetailResponse(BaseModel):
+    bill: BillResponse
+    order_id: UUID
+    order_number: int
+    order_type: OrderType
+    order_created_at: datetime
+    settled_at: Optional[datetime] = None
+    table_label: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_mobile: Optional[str] = None
+    guest_count: Optional[int] = None
+    pay_later: bool = False
+    order_notes: Optional[str] = None
+    lines: list[OrderLineResponse] = Field(default_factory=list)
+    kots: list[KotResponse] = Field(default_factory=list)
+
+
 class OrderResponse(BaseModel):
     id: UUID
     outlet_id: UUID
@@ -200,6 +241,11 @@ class OrderResponse(BaseModel):
     notes: Optional[str]
     created_at: datetime
     settled_at: Optional[datetime]
+    time_session_start: Optional[datetime] = None
+    time_session_end: Optional[datetime] = None
+    time_billed_minutes: Optional[int] = None
+    hourly_rate_snapshot: Optional[Decimal] = None
+    time_charge: Optional[Decimal] = None
     lines: list[OrderLineResponse] = Field(default_factory=list)
     running_subtotal: Decimal = Decimal("0")
 
@@ -211,6 +257,7 @@ class FloorTableStatus(BaseModel):
     area_id: UUID
     label: str
     resource_kind: str
+    hourly_rate: Optional[Decimal] = None
     is_occupied: bool
     visual_state: TableVisualState = TableVisualState.BLANK
     current_order_id: Optional[UUID] = None
@@ -224,6 +271,10 @@ class FloorTableStatus(BaseModel):
 class FloorAreaStatus(BaseModel):
     area_id: UUID
     name: str
+    billing_mode: str = "dine_in"
+    operating_start: Optional[str] = None
+    operating_end: Optional[str] = None
+    hourly_rate: Optional[Decimal] = None
     tables: list[FloorTableStatus]
 
 

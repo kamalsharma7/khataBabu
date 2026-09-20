@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from decimal import Decimal
 
@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.enums import (
     BillStatus,
+    FoodType,
     KotStatus,
     OrderLineStatus,
     OrderStatus,
@@ -29,9 +30,10 @@ from app.models.order import (
     PosOrderLineAddon,
 )
 from app.models.tenant import BusinessOwner
-from app.models.venue import VenueArea, VenueTable
+from app.models.venue import ResourceKind, VenueArea, VenueTable
 from app.schemas.owner.order import (
     AddBillPaymentRequest,
+    BillDetailResponse,
     BillListEntryResponse,
     BillPaymentResponse,
     BillPreviewRequest,
@@ -43,6 +45,7 @@ from app.schemas.owner.order import (
     KotResponse,
     OrderCreate,
     OrderLineAddonResponse,
+    OpenOrderLineCreate,
     OrderLineCreate,
     OrderLineResponse,
     OrderLineUpdate,
@@ -59,13 +62,24 @@ from app.services.owner.access import assert_business_operational, get_outlet_fo
 from app.services.owner.order_counters import next_outlet_counter
 from app.services.owner.order_pricing import (
     compute_bill_totals,
+    compute_time_charge,
     default_tax_percent_for_business,
     line_total,
     money,
+    order_effective_subtotal,
     order_subtotal,
     resolve_tax_percent,
     subtotal_from_lines,
 )
+
+
+def historical_table_label(order: PosOrder, table: VenueTable | None) -> str | None:
+    """Frozen at order open/transfer; bill history does not follow venue table renames."""
+    if order.table_label_snapshot:
+        return order.table_label_snapshot
+    if table is not None:
+        return table.label
+    return None
 
 
 class OwnerOrderService:
@@ -146,6 +160,23 @@ class OwnerOrderService:
 
         now = datetime.now(timezone.utc)
 
+        areas_by_id = {a.id: a for a in areas}
+
+        def _area_time_str(value: object | None) -> str | None:
+            if value is None:
+                return None
+            if hasattr(value, "hour") and hasattr(value, "minute"):
+                return f"{value.hour:02d}:{value.minute:02d}"
+            return str(value)
+
+        def _effective_hourly_rate(table: VenueTable) -> Decimal | None:
+            area = areas_by_id.get(table.area_id)
+            if table.hourly_rate is not None:
+                return table.hourly_rate
+            if area is not None and area.hourly_rate is not None:
+                return area.hourly_rate
+            return None
+
         area_payload: list[FloorAreaStatus] = []
         for area in areas:
             area_tables = [t for t in tables if t.area_id == area.id]
@@ -171,6 +202,7 @@ class OwnerOrderService:
                         area_id=area.id,
                         label=table.label,
                         resource_kind=table.resource_kind.value,
+                        hourly_rate=_effective_hourly_rate(table),
                         is_occupied=order is not None,
                         visual_state=visual,
                         current_order_id=order.id if order else None,
@@ -182,7 +214,15 @@ class OwnerOrderService:
                     ),
                 )
             area_payload.append(
-                FloorAreaStatus(area_id=area.id, name=area.name, tables=table_rows),
+                FloorAreaStatus(
+                    area_id=area.id,
+                    name=area.name,
+                    billing_mode=area.billing_mode.value,
+                    operating_start=_area_time_str(area.operating_start),
+                    operating_end=_area_time_str(area.operating_end),
+                    hourly_rate=area.hourly_rate,
+                    tables=table_rows,
+                ),
             )
         return FloorStatusResponse(areas=area_payload)
 
@@ -213,8 +253,10 @@ class OwnerOrderService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="venue_table_id is required for dine-in orders",
             )
+        table_label_snapshot: str | None = None
         if payload.venue_table_id is not None:
-            await self._get_table(owner, outlet_id, payload.venue_table_id)
+            table = await self._get_table(owner, outlet_id, payload.venue_table_id)
+            table_label_snapshot = table.label
             existing = await self._open_order_for_table(outlet_id, payload.venue_table_id)
             if existing is not None:
                 raise HTTPException(
@@ -227,6 +269,7 @@ class OwnerOrderService:
             order_type=payload.order_type,
             order_number=order_number,
             venue_table_id=payload.venue_table_id,
+            table_label_snapshot=table_label_snapshot,
             guest_count=payload.guest_count,
             notes=payload.notes,
             opened_by_owner_id=owner.id,
@@ -266,6 +309,15 @@ class OwnerOrderService:
             order.pay_later = payload.pay_later
         if payload.notes is not None:
             order.notes = payload.notes
+        if (
+            payload.time_duration_minutes is not None
+            or payload.time_start_now
+            or payload.time_end_now
+            or payload.time_session_start is not None
+            or payload.time_session_end is not None
+            or payload.clear_time_session
+        ):
+            await self._apply_time_session_patch(owner, outlet_id, order, payload)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -301,7 +353,7 @@ class OwnerOrderService:
         self._assert_order_open(order)
         if order.order_type != OrderType.DINE_IN:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a dine-in order")
-        await self._get_table(owner, outlet_id, payload.venue_table_id)
+        table = await self._get_table(owner, outlet_id, payload.venue_table_id)
         if payload.venue_table_id == order.venue_table_id:
             return self._order_response(order)
         other = await self._open_order_for_table(outlet_id, payload.venue_table_id)
@@ -311,6 +363,7 @@ class OwnerOrderService:
                 detail="Target table already has an open order",
             )
         order.venue_table_id = payload.venue_table_id
+        order.table_label_snapshot = table.label
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -356,6 +409,47 @@ class OwnerOrderService:
             )
         self.db.add(row)
         await self.db.flush()
+        await self._maybe_refresh_open_bill(order.id)
+        await self.db.commit()
+        return await self._fresh_order(owner, outlet_id, order_id)
+
+    async def add_open_line(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order_id: uuid.UUID,
+        payload: OpenOrderLineCreate,
+    ) -> OrderResponse:
+        assert_business_operational(owner.business)
+        order = await self._load_order(owner, outlet_id, order_id)
+        self._assert_order_open(order)
+        name = payload.description.strip()
+        food_type = FoodType.VEG
+        linked_item_id: uuid.UUID | None = None
+        if payload.menu_item_id is not None:
+            item = await self._get_menu_item(outlet_id, payload.menu_item_id)
+            linked_item_id = item.id
+            food_type = item.food_type
+        unit_price = money(payload.unit_price)
+        addons_total = Decimal("0")
+        qty = payload.quantity
+        row = PosOrderLine(
+            order_id=order.id,
+            menu_item_id=linked_item_id,
+            is_open_item=True,
+            item_name=name,
+            variation_name=None,
+            quantity=qty,
+            unit_price=unit_price,
+            addons_total=addons_total,
+            line_total=line_total(unit_price, addons_total, qty),
+            notes=payload.notes,
+            food_type=food_type,
+            status=OrderLineStatus.PENDING_KOT,
+        )
+        self.db.add(row)
+        await self.db.flush()
+        await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -371,16 +465,25 @@ class OwnerOrderService:
         order = await self._load_order(owner, outlet_id, order_id)
         self._assert_order_open(order)
         line = self._get_line(order, line_id)
-        if line.status != OrderLineStatus.PENDING_KOT:
+        if line.status not in (OrderLineStatus.PENDING_KOT, OrderLineStatus.IN_KOT):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only items not yet sent to kitchen can be edited",
+                detail="This item can no longer be edited",
             )
+        if payload.unit_price is not None:
+            if not line.is_open_item:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Price can only be changed on open items",
+                )
+            line.unit_price = money(payload.unit_price)
         if payload.quantity is not None:
             line.quantity = payload.quantity
+        if payload.quantity is not None or payload.unit_price is not None:
             line.line_total = line_total(line.unit_price, line.addons_total, line.quantity)
         if payload.notes is not None:
             line.notes = payload.notes
+        await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -401,6 +504,7 @@ class OwnerOrderService:
                 detail="Cannot remove items already sent to kitchen",
             )
         await self.db.delete(line)
+        await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -418,6 +522,7 @@ class OwnerOrderService:
         if line.status == OrderLineStatus.CANCELLED:
             return self._order_response(order)
         line.status = OrderLineStatus.CANCELLED
+        await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -532,9 +637,9 @@ class OwnerOrderService:
         self._assert_order_open(order)
         lines = await self._fetch_order_lines(order_id)
         active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
-        if not active_lines:
+        subtotal = order_effective_subtotal(order, lines)
+        if not active_lines and (order.time_charge or Decimal("0")) <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Order has no billable items")
-        subtotal = subtotal_from_lines(lines)
         discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
             subtotal,
             preview.discount_amount,
@@ -632,11 +737,51 @@ class OwnerOrderService:
                     order_number=order.order_number,
                     settled_at=order.settled_at,
                     created_at=bill.created_at,
-                    table_label=table.label if table else None,
+                    table_label=historical_table_label(order, table),
                     customer_name=order.customer_name,
                 ),
             )
         return entries
+
+    async def get_bill_detail(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        bill_id: uuid.UUID,
+    ) -> BillDetailResponse:
+        bill = await self._load_bill(owner, outlet_id, bill_id)
+        result = await self.db.execute(
+            select(PosOrder, VenueTable)
+            .outerjoin(VenueTable, PosOrder.venue_table_id == VenueTable.id)
+            .where(PosOrder.id == bill.order_id, PosOrder.outlet_id == outlet_id),
+        )
+        row = result.one_or_none()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+        order, table = row
+        lines = await self._fetch_order_lines(order.id)
+        lines_out: list[OrderLineResponse] = []
+        for line in lines:
+            lr = OrderLineResponse.model_validate(line)
+            lr.addons = [OrderLineAddonResponse.model_validate(a) for a in line.addons]
+            lines_out.append(lr)
+        kots = await self.list_kots_for_order(owner, outlet_id, order.id)
+        return BillDetailResponse(
+            bill=self._bill_response(bill),
+            order_id=order.id,
+            order_number=order.order_number,
+            order_type=order.order_type,
+            order_created_at=order.created_at,
+            settled_at=order.settled_at,
+            table_label=historical_table_label(order, table),
+            customer_name=order.customer_name,
+            customer_mobile=order.customer_mobile,
+            guest_count=order.guest_count,
+            pay_later=order.pay_later,
+            order_notes=order.notes,
+            lines=lines_out,
+            kots=kots,
+        )
 
     async def add_bill_payment(
         self,
@@ -705,7 +850,7 @@ class OwnerOrderService:
         order = await self._load_order_head(owner, outlet_id, bill.order_id)
         self._assert_order_open(order)
         lines = await self._fetch_order_lines(bill.order_id)
-        subtotal = subtotal_from_lines(lines)
+        subtotal = order_effective_subtotal(order, lines)
         discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
             subtotal,
             preview.discount_amount,
@@ -732,6 +877,7 @@ class OwnerOrderService:
             bill.status = BillStatus.SETTLED
             order.status = OrderStatus.SETTLED
             order.settled_at = datetime.now(timezone.utc)
+            await self._ensure_table_label_snapshot(owner, outlet_id, order)
             await self.db.commit()
             return await self.get_bill(owner, outlet_id, bill.id)
         for payment in payload.payments:
@@ -745,6 +891,7 @@ class OwnerOrderService:
         bill.status = BillStatus.SETTLED
         order.status = OrderStatus.SETTLED
         order.settled_at = datetime.now(timezone.utc)
+        await self._ensure_table_label_snapshot(owner, outlet_id, order)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
 
@@ -756,8 +903,9 @@ class OwnerOrderService:
         discount_percent: Decimal,
         tax_percent: Decimal,
     ) -> None:
+        order = await self._load_order_head_by_id(order_id)
         lines = await self._fetch_order_lines(order_id)
-        subtotal = subtotal_from_lines(lines)
+        subtotal = order_effective_subtotal(order, lines)
         discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
             subtotal,
             discount_amount,
@@ -774,7 +922,7 @@ class OwnerOrderService:
         bill.grand_total = grand_total
 
     def _bill_response(self, bill: PosBill) -> BillResponse:
-        paid = sum((p.amount for p in bill.payments), Decimal("0"))
+        paid = money(sum((p.amount for p in bill.payments), Decimal("0")))
         payments_out = [
             BillPaymentResponse(
                 id=p.id,
@@ -801,6 +949,18 @@ class OwnerOrderService:
             status=bill.status,
             payments=payments_out,
         )
+
+    async def _get_menu_item(self, outlet_id: uuid.UUID, menu_item_id: uuid.UUID) -> MenuItem:
+        result = await self.db.execute(
+            select(MenuItem).where(
+                MenuItem.id == menu_item_id,
+                MenuItem.outlet_id == outlet_id,
+            ),
+        )
+        item = result.scalar_one_or_none()
+        if item is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu item not found")
+        return item
 
     async def _resolve_menu_line(
         self,
@@ -889,6 +1049,17 @@ class OwnerOrderService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bill not found")
         return bill
 
+    async def _ensure_table_label_snapshot(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order: PosOrder,
+    ) -> None:
+        if order.table_label_snapshot or order.venue_table_id is None:
+            return
+        table = await self._get_table(owner, outlet_id, order.venue_table_id)
+        order.table_label_snapshot = table.label
+
     async def _get_table(
         self,
         owner: BusinessOwner,
@@ -906,6 +1077,19 @@ class OwnerOrderService:
         if table is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Table not found")
         return table
+
+    async def _maybe_refresh_open_bill(self, order_id: uuid.UUID) -> None:
+        bill = await self._get_open_bill(order_id)
+        if bill is None:
+            return
+        disc_amt, disc_pct = self._discount_inputs_for_recompute(bill)
+        await self._refresh_bill_amounts(
+            bill,
+            order_id,
+            disc_amt,
+            disc_pct,
+            bill.tax_percent,
+        )
 
     async def _get_open_bill(self, order_id: uuid.UUID) -> PosBill | None:
         result = await self.db.execute(
@@ -1001,8 +1185,7 @@ class OwnerOrderService:
             lr = OrderLineResponse.model_validate(line)
             lr.addons = [OrderLineAddonResponse.model_validate(a) for a in line.addons]
             lines_out.append(lr)
-            if line.status != OrderLineStatus.CANCELLED:
-                subtotal += line.line_total
+        subtotal = order_effective_subtotal(order, source)
         return OrderResponse(
             id=order.id,
             outlet_id=order.outlet_id,
@@ -1017,6 +1200,178 @@ class OwnerOrderService:
             notes=order.notes,
             created_at=order.created_at,
             settled_at=order.settled_at,
+            time_session_start=order.time_session_start,
+            time_session_end=order.time_session_end,
+            time_billed_minutes=order.time_billed_minutes,
+            hourly_rate_snapshot=order.hourly_rate_snapshot,
+            time_charge=order.time_charge,
             lines=lines_out,
             running_subtotal=money(subtotal),
         )
+
+    async def _load_order_head_by_id(self, order_id: uuid.UUID) -> PosOrder:
+        result = await self.db.execute(select(PosOrder).where(PosOrder.id == order_id))
+        order = result.scalar_one_or_none()
+        if order is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+        return order
+
+    async def _resolve_hourly_rate_for_order(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order: PosOrder,
+    ) -> Decimal:
+        if order.venue_table_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Time billing requires a table",
+            )
+        table = await self._get_table(owner, outlet_id, order.venue_table_id)
+        if table.resource_kind != ResourceKind.TIME_BASED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This table is not time-based",
+            )
+        rate = table.hourly_rate
+        if rate is None:
+            area = await self._get_area_for_table(owner, outlet_id, table)
+            rate = area.hourly_rate
+        if rate is None or rate <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Hourly rate is not configured for this table or area",
+            )
+        return rate
+
+    async def _get_area_for_table(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        table: VenueTable,
+    ) -> VenueArea:
+        result = await self.db.execute(
+            select(VenueArea).where(
+                VenueArea.id == table.area_id,
+                VenueArea.outlet_id == outlet_id,
+            ),
+        )
+        area = result.scalar_one_or_none()
+        if area is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Area not found")
+        return area
+
+    @staticmethod
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    def _set_time_session(
+        self,
+        order: PosOrder,
+        start: datetime,
+        end: datetime,
+        rate: Decimal,
+    ) -> None:
+        start = self._ensure_utc(start)
+        end = self._ensure_utc(end)
+        if end <= start:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End time must be after start time",
+            )
+        minutes = max(1, int((end - start).total_seconds() // 60))
+        order.time_session_start = start
+        order.time_session_end = end
+        order.time_billed_minutes = minutes
+        order.hourly_rate_snapshot = rate
+        order.time_charge = compute_time_charge(minutes, rate)
+
+    async def _apply_time_session_patch(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order: PosOrder,
+        payload: OrderUpdate,
+    ) -> None:
+        if payload.clear_time_session:
+            order.time_session_start = None
+            order.time_session_end = None
+            order.time_billed_minutes = None
+            order.hourly_rate_snapshot = None
+            order.time_charge = None
+            return
+
+        rate = await self._resolve_hourly_rate_for_order(owner, outlet_id, order)
+        now = datetime.now(timezone.utc)
+
+        if payload.time_session_start is not None and payload.time_session_end is not None:
+            self._set_time_session(
+                order,
+                payload.time_session_start,
+                payload.time_session_end,
+                rate,
+            )
+            return
+
+        if payload.time_session_start is not None and payload.time_session_end is None:
+            order.time_session_start = self._ensure_utc(payload.time_session_start)
+            order.time_session_end = None
+            order.time_billed_minutes = None
+            order.time_charge = None
+            order.hourly_rate_snapshot = rate
+            return
+
+        if payload.time_session_end is not None and payload.time_session_start is None:
+            if order.time_session_start is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Set start time before end",
+                )
+            self._set_time_session(
+                order,
+                order.time_session_start,
+                payload.time_session_end,
+                rate,
+            )
+            return
+
+        if payload.time_start_now:
+            order.time_session_start = now
+            order.time_session_end = None
+            order.time_billed_minutes = None
+            order.hourly_rate_snapshot = rate
+            order.time_charge = None
+            return
+
+        if payload.time_end_now:
+            if order.time_session_start is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Set start time before end",
+                )
+            start = order.time_session_start
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            end = now
+            if end < start:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="End time cannot be before start",
+                )
+            minutes = max(1, int((end - start).total_seconds() // 60))
+            order.time_session_end = end
+            order.time_billed_minutes = minutes
+            order.hourly_rate_snapshot = rate
+            order.time_charge = compute_time_charge(minutes, rate)
+            return
+
+        if payload.time_duration_minutes is not None:
+            minutes = payload.time_duration_minutes
+            if payload.time_session_start is not None:
+                start = self._ensure_utc(payload.time_session_start)
+            else:
+                start = now
+            end = start + timedelta(minutes=minutes)
+            self._set_time_session(order, start, end, rate)

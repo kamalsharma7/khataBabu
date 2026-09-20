@@ -23,14 +23,30 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
 
         start = time.perf_counter()
-        response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger.exception(
+                "http_request_failed",
+                method=request.method,
+                path=request.url.path,
+                duration_ms=round(duration_ms, 2),
+            )
+            raise
 
+        duration_ms = (time.perf_counter() - start) * 1000
         response.headers[header] = request_id
-        logger.info(
-            "http_request",
-            method=request.method,
-            status_code=response.status_code,
-            duration_ms=round(duration_ms, 2),
-        )
+        log_kwargs = {
+            "method": request.method,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_ms, 2),
+            "query": request.url.query or None,
+        }
+        if response.status_code >= 500:
+            logger.error("http_request", **log_kwargs)
+        elif response.status_code >= 400:
+            logger.warning("http_request", **log_kwargs)
+        else:
+            logger.info("http_request", **log_kwargs)
         return response
