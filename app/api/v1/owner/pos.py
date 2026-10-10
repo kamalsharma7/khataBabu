@@ -27,6 +27,7 @@ from app.schemas.owner.order import (
     OrderTransferTable,
     OrderUpdate,
     SendKotRequest,
+    SaveOrderBillRequest,
     SettleBillRequest,
     PosBillingSettingsResponse,
     SplitBillPreviewBody,
@@ -242,6 +243,18 @@ async def get_kot(
 ) -> KotResponse:
     service = OwnerOrderService(db)
     return await service.get_kot(owner, outlet_id, kot_id)
+
+
+@router.post("/orders/{order_id}/save-bill", response_model=BillResponse)
+async def save_order_bill(
+    outlet_id: uuid.UUID,
+    order_id: uuid.UUID,
+    body: SaveOrderBillRequest,
+    owner: BusinessOwner = Depends(get_current_owner),
+    db: AsyncSession = Depends(get_db),
+) -> BillResponse:
+    service = OwnerOrderService(db)
+    return await service.save_order_bill(owner, outlet_id, order_id, body)
 
 
 @router.post("/orders/{order_id}/bill", response_model=BillResponse)

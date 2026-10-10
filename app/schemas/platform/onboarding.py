@@ -85,10 +85,19 @@ class BusinessOnboardingInput(BaseModel):
         return self
 
 
+class StaffProvisioningInput(BaseModel):
+    """Extra POS logins created at onboarding (owner login is always created)."""
+
+    admin_seats: int = Field(default=0, ge=0, le=5)
+    worker_seats: int = Field(default=0, ge=0, le=20)
+
+
 class TenantOnboardingCreateRequest(BaseModel):
     business: BusinessOnboardingInput
     owner: OwnerOnboardingInput
     outlet: OutletOnboardingInput
+    assigned_sales_employee_id: UUID | None = None
+    staff: StaffProvisioningInput = Field(default_factory=StaffProvisioningInput)
 
 
 class OwnerCredentialsOnce(BaseModel):
@@ -104,6 +113,7 @@ class TenantOnboardingCreateResponse(BaseModel):
     outlet_ref_code: str
     status: TenantStatus
     owner_credentials: OwnerCredentialsOnce
+    staff_credentials: list[OwnerCredentialsOnce] = Field(default_factory=list)
     message: str = (
         "Share owner credentials securely once. Temporary password is not stored in plain text "
         "and cannot be retrieved again."

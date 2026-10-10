@@ -41,13 +41,44 @@ def subtotal_from_lines(lines: list[PosOrderLine]) -> Decimal:
     return money(total)
 
 
+def compute_item_gst_breakdown(
+    line_totals: list[tuple[Decimal, Decimal, Decimal]],
+    discount_amount: Decimal,
+    discount_percent: Decimal,
+    subtotal: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """line_totals: (line_total, cgst_percent, sgst_percent) per active line."""
+    subtotal = money(subtotal)
+    discount = money(discount_amount)
+    if discount_percent > 0:
+        discount = money(subtotal * discount_percent / Decimal("100"))
+    if discount > subtotal:
+        discount = subtotal
+    ratio = Decimal("1")
+    if subtotal > 0:
+        ratio = (subtotal - discount) / subtotal
+    cgst_total = Decimal("0")
+    sgst_total = Decimal("0")
+    for line_total, cgst_pct, sgst_pct in line_totals:
+        taxable = money(line_total * ratio)
+        if cgst_pct > 0 or sgst_pct > 0:
+            cgst_total += money(taxable * cgst_pct / Decimal("100"))
+            sgst_total += money(taxable * sgst_pct / Decimal("100"))
+    tax_amount = money(cgst_total + sgst_total)
+    return cgst_total, sgst_total, tax_amount
+
+
 def compute_bill_totals(
     subtotal: Decimal,
     discount_amount: Decimal,
     discount_percent: Decimal,
     tax_percent: Decimal,
     round_to_rupee: bool = True,
-) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+    *,
+    cgst_amount: Decimal | None = None,
+    sgst_amount: Decimal | None = None,
+    tip_amount: Decimal = Decimal("0"),
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
     subtotal = money(subtotal)
     discount = money(discount_amount)
     if discount_percent > 0:
@@ -55,14 +86,22 @@ def compute_bill_totals(
     if discount > subtotal:
         discount = subtotal
     taxable = money(subtotal - discount)
-    tax_amount = money(taxable * tax_percent / Decimal("100"))
-    grand = money(taxable + tax_amount)
+    if cgst_amount is not None and sgst_amount is not None:
+        cgst = money(cgst_amount)
+        sgst = money(sgst_amount)
+        tax_amount = money(cgst + sgst)
+    else:
+        cgst = Decimal("0")
+        sgst = Decimal("0")
+        tax_amount = money(taxable * tax_percent / Decimal("100"))
+    tip = money(tip_amount)
+    grand = money(taxable + tax_amount + tip)
     round_off = Decimal("0")
     if round_to_rupee:
         rounded = money(Decimal(grand.to_integral_value()))
         round_off = money(rounded - grand)
         grand = rounded
-    return discount, tax_amount, round_off, grand, taxable
+    return discount, tax_amount, round_off, grand, taxable, cgst, sgst
 
 
 def line_total(unit_price: Decimal, addons_total: Decimal, quantity: int) -> Decimal:

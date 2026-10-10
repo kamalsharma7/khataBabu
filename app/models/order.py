@@ -23,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.models.enums import (
     BillStatus,
+    CustomerRelation,
     FoodType,
     KotStatus,
     OrderLineStatus,
@@ -101,6 +102,12 @@ class PosOrder(Base, TimestampMixin):
     guest_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     customer_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     customer_mobile: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    customer_locality: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    customer_relation: Mapped[Optional[CustomerRelation]] = mapped_column(
+        Enum(CustomerRelation, name="customer_relation", native_enum=False),
+        nullable=True,
+    )
+    bill_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     pay_later: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     opened_by_owner_id: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -302,6 +309,9 @@ class PosBill(Base, TimestampMixin):
     discount_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     tax_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    cgst_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    sgst_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    tip_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
     round_off: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
     grand_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[BillStatus] = mapped_column(

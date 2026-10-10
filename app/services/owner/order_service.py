@@ -60,8 +60,10 @@ from app.schemas.owner.order import (
 )
 from app.services.owner.access import assert_business_operational, get_outlet_for_owner
 from app.services.owner.order_counters import next_outlet_counter
+from app.services.owner.inventory_service import OwnerInventoryService
 from app.services.owner.order_pricing import (
     compute_bill_totals,
+    compute_item_gst_breakdown,
     compute_time_charge,
     default_tax_percent_for_business,
     line_total,
@@ -305,6 +307,12 @@ class OwnerOrderService:
             order.customer_name = payload.customer_name.strip() or None
         if payload.customer_mobile is not None:
             order.customer_mobile = payload.customer_mobile.strip() or None
+        if payload.customer_locality is not None:
+            order.customer_locality = payload.customer_locality.strip() or None
+        if payload.customer_relation is not None:
+            order.customer_relation = payload.customer_relation
+        if payload.order_type is not None:
+            order.order_type = payload.order_type
         if payload.pay_later is not None:
             order.pay_later = payload.pay_later
         if payload.notes is not None:
@@ -409,9 +417,12 @@ class OwnerOrderService:
             )
         self.db.add(row)
         await self.db.flush()
+        inv = OwnerInventoryService(self.db)
+        stock_warnings = await inv.check_stock_for_line(outlet_id, item.id, payload.quantity)
         await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
-        return await self._fresh_order(owner, outlet_id, order_id)
+        response = await self._fresh_order(owner, outlet_id, order_id)
+        return response.model_copy(update={"warnings": stock_warnings})
 
     async def add_open_line(
         self,
@@ -624,6 +635,76 @@ class OwnerOrderService:
             lines=line_payload,
         )
 
+    async def _bill_amounts(
+        self,
+        owner: BusinessOwner,
+        order: PosOrder,
+        lines: list[PosOrderLine],
+        preview: BillPreviewRequest,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
+        subtotal = order_effective_subtotal(order, lines)
+        active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
+        menu_ids = [line.menu_item_id for line in active_lines if line.menu_item_id]
+        menu_by_id: dict[uuid.UUID, MenuItem] = {}
+        if menu_ids:
+            menu_result = await self.db.execute(
+                select(MenuItem).where(MenuItem.id.in_(menu_ids)),
+            )
+            menu_by_id = {row.id: row for row in menu_result.scalars().all()}
+        line_gst_rows: list[tuple[Decimal, Decimal, Decimal]] = []
+        for line in active_lines:
+            cgst_pct = Decimal("0")
+            sgst_pct = Decimal("0")
+            if line.menu_item_id and line.menu_item_id in menu_by_id:
+                menu_row = menu_by_id[line.menu_item_id]
+                if menu_row.gst_applicable:
+                    cgst_pct = menu_row.cgst_percent
+                    sgst_pct = menu_row.sgst_percent
+            line_gst_rows.append((line.line_total, cgst_pct, sgst_pct))
+        cgst_amt: Decimal | None = None
+        sgst_amt: Decimal | None = None
+        if owner.business.gst_registered and any(r[1] or r[2] for r in line_gst_rows):
+            cgst_amt, sgst_amt, _ = compute_item_gst_breakdown(
+                line_gst_rows,
+                preview.discount_amount,
+                preview.discount_percent,
+                subtotal,
+            )
+        discount, tax_amount, round_off, grand_total, _taxable, cgst, sgst = compute_bill_totals(
+            subtotal,
+            preview.discount_amount,
+            preview.discount_percent,
+            preview.tax_percent,
+            preview.round_to_rupee,
+            cgst_amount=cgst_amt,
+            sgst_amount=sgst_amt,
+            tip_amount=preview.tip_amount,
+        )
+        return (
+            subtotal,
+            discount,
+            preview.discount_percent,
+            preview.tax_percent,
+            tax_amount,
+            cgst,
+            sgst,
+            round_off,
+            grand_total,
+        )
+
+    def _apply_bill_amounts(self, bill: PosBill, preview: BillPreviewRequest, amounts: tuple) -> None:
+        subtotal, discount, disc_pct, tax_pct, tax_amount, cgst, sgst, round_off, grand_total = amounts
+        bill.subtotal = subtotal
+        bill.discount_amount = discount
+        bill.discount_percent = disc_pct
+        bill.tax_percent = tax_pct
+        bill.tax_amount = tax_amount
+        bill.cgst_amount = cgst
+        bill.sgst_amount = sgst
+        bill.tip_amount = preview.tip_amount
+        bill.round_off = round_off
+        bill.grand_total = grand_total
+
     async def create_or_refresh_bill(
         self,
         owner: BusinessOwner,
@@ -637,16 +718,9 @@ class OwnerOrderService:
         self._assert_order_open(order)
         lines = await self._fetch_order_lines(order_id)
         active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
-        subtotal = order_effective_subtotal(order, lines)
         if not active_lines and (order.time_charge or Decimal("0")) <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Order has no billable items")
-        discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
-            subtotal,
-            preview.discount_amount,
-            preview.discount_percent,
-            preview.tax_percent,
-            preview.round_to_rupee,
-        )
+        amounts = await self._bill_amounts(owner, order, lines, preview)
         bill = await self._get_open_bill(order.id)
         if bill is None:
             bill_number = await next_outlet_counter(self.db, outlet_id, "bill")
@@ -654,27 +728,25 @@ class OwnerOrderService:
                 outlet_id=outlet_id,
                 order_id=order.id,
                 bill_number=bill_number,
-                subtotal=subtotal,
-                discount_amount=discount,
-                discount_percent=preview.discount_percent,
-                tax_percent=preview.tax_percent,
-                tax_amount=tax_amount,
-                round_off=round_off,
-                grand_total=grand_total,
                 status=BillStatus.OPEN,
             )
             self.db.add(bill)
-            await self.db.flush()
-        else:
-            bill.subtotal = subtotal
-            bill.discount_amount = discount
-            bill.discount_percent = preview.discount_percent
-            bill.tax_percent = preview.tax_percent
-            bill.tax_amount = tax_amount
-            bill.round_off = round_off
-            bill.grand_total = grand_total
+        self._apply_bill_amounts(bill, preview, amounts)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
+
+    async def save_order_bill(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order_id: uuid.UUID,
+        payload: BillPreviewRequest,
+    ) -> BillResponse:
+        bill = await self.create_or_refresh_bill(owner, outlet_id, order_id, payload)
+        order = await self._load_order_head(owner, outlet_id, order_id)
+        order.bill_saved_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        return bill
 
     async def get_bill_for_order(
         self,
@@ -850,21 +922,8 @@ class OwnerOrderService:
         order = await self._load_order_head(owner, outlet_id, bill.order_id)
         self._assert_order_open(order)
         lines = await self._fetch_order_lines(bill.order_id)
-        subtotal = order_effective_subtotal(order, lines)
-        discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
-            subtotal,
-            preview.discount_amount,
-            preview.discount_percent,
-            preview.tax_percent,
-            preview.round_to_rupee,
-        )
-        bill.subtotal = subtotal
-        bill.discount_amount = discount
-        bill.discount_percent = preview.discount_percent
-        bill.tax_percent = preview.tax_percent
-        bill.tax_amount = tax_amount
-        bill.round_off = round_off
-        bill.grand_total = grand_total
+        amounts = await self._bill_amounts(owner, order, lines, preview)
+        self._apply_bill_amounts(bill, preview, amounts)
         existing_paid = sum((p.amount for p in bill.payments), Decimal("0"))
         new_paid = sum((p.amount for p in payload.payments), Decimal("0"))
         total_paid = existing_paid + new_paid
@@ -873,10 +932,13 @@ class OwnerOrderService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Payments ({total_paid}) must equal grand total ({bill.grand_total})",
             )
+        inv = OwnerInventoryService(self.db)
+        active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
         if not payload.payments and money(existing_paid) == money(bill.grand_total):
             bill.status = BillStatus.SETTLED
             order.status = OrderStatus.SETTLED
             order.settled_at = datetime.now(timezone.utc)
+            await inv.deduct_for_order_lines(outlet_id, active_lines)
             await self._ensure_table_label_snapshot(owner, outlet_id, order)
             await self.db.commit()
             return await self.get_bill(owner, outlet_id, bill.id)
@@ -891,6 +953,7 @@ class OwnerOrderService:
         bill.status = BillStatus.SETTLED
         order.status = OrderStatus.SETTLED
         order.settled_at = datetime.now(timezone.utc)
+        await inv.deduct_for_order_lines(outlet_id, active_lines)
         await self._ensure_table_label_snapshot(owner, outlet_id, order)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
@@ -906,18 +969,21 @@ class OwnerOrderService:
         order = await self._load_order_head_by_id(order_id)
         lines = await self._fetch_order_lines(order_id)
         subtotal = order_effective_subtotal(order, lines)
-        discount, tax_amount, round_off, grand_total, _taxable = compute_bill_totals(
+        discount, tax_amount, round_off, grand_total, _taxable, cgst, sgst = compute_bill_totals(
             subtotal,
             discount_amount,
             discount_percent,
             tax_percent,
             True,
+            tip_amount=bill.tip_amount or Decimal("0"),
         )
         bill.subtotal = subtotal
         bill.discount_amount = discount
         bill.discount_percent = discount_percent
         bill.tax_percent = tax_percent
         bill.tax_amount = tax_amount
+        bill.cgst_amount = cgst
+        bill.sgst_amount = sgst
         bill.round_off = round_off
         bill.grand_total = grand_total
 
@@ -942,6 +1008,9 @@ class OwnerOrderService:
             discount_percent=bill.discount_percent,
             tax_percent=bill.tax_percent,
             tax_amount=bill.tax_amount,
+            cgst_amount=bill.cgst_amount,
+            sgst_amount=bill.sgst_amount,
+            tip_amount=bill.tip_amount,
             round_off=bill.round_off,
             grand_total=bill.grand_total,
             amount_paid=money(paid),
@@ -1131,6 +1200,8 @@ class OwnerOrderService:
 
     @staticmethod
     def _table_visual_state(order: PosOrder, has_kot_sent: bool) -> TableVisualState:
+        if order.bill_saved_at is not None:
+            return TableVisualState.PRINTED
         active = [line for line in order.lines if line.status != OrderLineStatus.CANCELLED]
         if not active:
             return TableVisualState.RUNNING
@@ -1196,6 +1267,9 @@ class OwnerOrderService:
             guest_count=order.guest_count,
             customer_name=order.customer_name,
             customer_mobile=order.customer_mobile,
+            customer_locality=order.customer_locality,
+            customer_relation=order.customer_relation,
+            bill_saved_at=order.bill_saved_at,
             pay_later=order.pay_later,
             notes=order.notes,
             created_at=order.created_at,
@@ -1207,6 +1281,7 @@ class OwnerOrderService:
             time_charge=order.time_charge,
             lines=lines_out,
             running_subtotal=money(subtotal),
+            warnings=[],
         )
 
     async def _load_order_head_by_id(self, order_id: uuid.UUID) -> PosOrder:

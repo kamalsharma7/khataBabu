@@ -1,5 +1,10 @@
 from decimal import Decimal
+from uuid import uuid4
 
+from app.models.enums import BillStatus
+from app.models.order import PosBill
+from app.schemas.owner.order import BillPreviewRequest
+from app.services.owner.order_service import OwnerOrderService
 from app.services.owner.order_pricing import (
     compute_bill_totals,
     default_tax_percent_for_business,
@@ -17,7 +22,7 @@ def test_gst_default_tax_when_registered():
 
 def test_compute_bill_with_discount_percent_and_tax():
     subtotal = Decimal("1000")
-    discount, tax_amount, round_off, grand, taxable = compute_bill_totals(
+    discount, tax_amount, round_off, grand, taxable, _cgst, _sgst = compute_bill_totals(
         subtotal,
         Decimal("0"),
         Decimal("10"),
@@ -38,7 +43,35 @@ def test_money_coerces_int():
 
 def test_split_payment_totals():
     subtotal = Decimal("200")
-    _, _, _, grand, _ = compute_bill_totals(subtotal, Decimal("0"), Decimal("0"), Decimal("0"), True)
+    _, _, _, grand, _, _, _ = compute_bill_totals(subtotal, Decimal("0"), Decimal("0"), Decimal("0"), True)
     assert grand == Decimal("200.00")
     half = money(grand / 2)
     assert money(half + half) == grand
+
+
+def test_new_bill_gets_subtotal_before_persist():
+    """Regression: flushing PosBill before _apply_bill_amounts caused null subtotal 500s on Save."""
+    from unittest.mock import MagicMock
+
+    svc = OwnerOrderService(MagicMock())
+    bill = PosBill(
+        outlet_id=uuid4(),
+        order_id=uuid4(),
+        bill_number=1,
+        status=BillStatus.OPEN,
+    )
+    preview = BillPreviewRequest()
+    amounts = (
+        Decimal("445.00"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("445.00"),
+    )
+    svc._apply_bill_amounts(bill, preview, amounts)
+    assert bill.subtotal == Decimal("445.00")
+    assert bill.grand_total == Decimal("445.00")

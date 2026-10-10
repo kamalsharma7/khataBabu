@@ -37,6 +37,19 @@ class OwnerProfileResponse(BaseModel):
     business_name: str
     business_status: str
     must_change_password: bool
+    role: str = "owner"
+    permissions: list[str] = Field(default_factory=list)
+    support_contact_name: str | None = None
+    support_contact_mobile: str | None = None
+
+
+class OwnerForgotPasswordRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+
+
+class OwnerResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 class OwnerChangePasswordRequest(BaseModel):

@@ -26,6 +26,16 @@ class PlanTier(str, enum.Enum):
 
 class OwnerRole(str, enum.Enum):
     OWNER = "owner"
+    ADMIN = "admin"
+    WORKER = "worker"
+
+
+class CustomerRelation(str, enum.Enum):
+    CUSTOMER = "customer"
+    FRIEND = "friend"
+    WORKER = "worker"
+    FAMILY = "family"
+    OTHER = "other"
 
 
 class OperatingModel(str, enum.Enum):

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.models.enums import (
     BillStatus,
+    CustomerRelation,
     FoodType,
     KotStatus,
     OrderLineStatus,
@@ -27,9 +28,12 @@ class OrderCreate(BaseModel):
 
 
 class OrderUpdate(BaseModel):
+    order_type: Optional[OrderType] = None
     guest_count: Optional[int] = Field(default=None, ge=1, le=99)
     customer_name: Optional[str] = Field(default=None, max_length=128)
     customer_mobile: Optional[str] = Field(default=None, max_length=20)
+    customer_locality: Optional[str] = Field(default=None, max_length=255)
+    customer_relation: Optional[CustomerRelation] = None
     pay_later: Optional[bool] = None
     notes: Optional[str] = Field(default=None, max_length=512)
     time_duration_minutes: Optional[int] = Field(
@@ -87,7 +91,14 @@ class BillPreviewRequest(BaseModel):
     discount_amount: Decimal = Field(default=Decimal("0"), ge=0)
     discount_percent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     tax_percent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    tip_amount: Decimal = Field(default=Decimal("0"), ge=0)
     round_to_rupee: bool = True
+
+
+class SaveOrderBillRequest(BillPreviewRequest):
+    """Finalize draft bill on table (Pet Pooja Save / Save & Print)."""
+
+    print_after_save: bool = False
 
 
 class PaymentInput(BaseModel):
@@ -192,6 +203,9 @@ class BillResponse(BaseModel):
     discount_percent: Decimal
     tax_percent: Decimal
     tax_amount: Decimal
+    cgst_amount: Decimal = Decimal("0")
+    sgst_amount: Decimal = Decimal("0")
+    tip_amount: Decimal = Decimal("0")
     round_off: Decimal
     grand_total: Decimal
     amount_paid: Decimal = Decimal("0")
@@ -237,6 +251,9 @@ class OrderResponse(BaseModel):
     guest_count: Optional[int]
     customer_name: Optional[str] = None
     customer_mobile: Optional[str] = None
+    customer_locality: Optional[str] = None
+    customer_relation: Optional[CustomerRelation] = None
+    bill_saved_at: Optional[datetime] = None
     pay_later: bool = False
     notes: Optional[str]
     created_at: datetime
@@ -248,6 +265,10 @@ class OrderResponse(BaseModel):
     time_charge: Optional[Decimal] = None
     lines: list[OrderLineResponse] = Field(default_factory=list)
     running_subtotal: Decimal = Decimal("0")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-blocking alerts from the last action (e.g. low inventory).",
+    )
 
     model_config = {"from_attributes": True}
 

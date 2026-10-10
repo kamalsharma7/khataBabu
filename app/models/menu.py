@@ -80,6 +80,9 @@ class MenuItem(Base, TimestampMixin):
     )
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gst_applicable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cgst_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=0)
+    sgst_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=0)
 
     category: Mapped["MenuCategory"] = relationship(back_populates="items")
     outlet: Mapped["Outlet"] = relationship(back_populates="menu_items")
@@ -92,6 +95,11 @@ class MenuItem(Base, TimestampMixin):
         back_populates="menu_item",
         cascade="all, delete-orphan",
         order_by="MenuItemAddon.sort_order",
+    )
+    inventory_links: Mapped[list["MenuItemInventoryLink"]] = relationship(
+        "MenuItemInventoryLink",
+        back_populates="menu_item",
+        cascade="all, delete-orphan",
     )
 
 
@@ -115,6 +123,7 @@ class MenuItemVariation(Base, TimestampMixin):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    weight_grams: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="variations")
 
@@ -139,5 +148,6 @@ class MenuItemAddon(Base, TimestampMixin):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    weight_grams: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="addons")

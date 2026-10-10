@@ -7,8 +7,10 @@ from app.db.deps import get_db
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.auth import (
     OwnerChangePasswordRequest,
+    OwnerForgotPasswordRequest,
     OwnerLoginRequest,
     OwnerProfileResponse,
+    OwnerResetPasswordRequest,
     OwnerTokenResponse,
 )
 from app.services.owner.auth_service import OwnerAuthService
@@ -34,6 +36,26 @@ async def owner_me(
 ) -> OwnerProfileResponse:
     service = OwnerAuthService(db, settings)
     return await service.profile(owner)
+
+
+@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+async def owner_forgot_password(
+    body: OwnerForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    service = OwnerAuthService(db, settings)
+    await service.request_password_reset(body)
+
+
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def owner_reset_password(
+    body: OwnerResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    service = OwnerAuthService(db, settings)
+    await service.reset_password(body)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

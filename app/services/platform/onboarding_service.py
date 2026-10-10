@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.security import generate_secure_password, hash_password, verify_password
-from app.models.enums import TenantStatus
+from app.models.enums import OwnerRole, TenantStatus
 from app.models.platform_admin import PlatformAuditLog, PlatformAdmin
+from app.models.platform_sales import PlatformSalesEmployee
 from app.models.tenant import Business, BusinessOwner, Outlet
 from app.schemas.platform.onboarding import (
     TenantOnboardingCreateRequest,
@@ -45,6 +47,19 @@ async def _unique_owner_username(db: AsyncSession, business_name: str) -> str:
         if exists.scalar_one_or_none() is None:
             return candidate
     raise HTTPException(status_code=500, detail="Could not allocate owner username")
+
+
+async def _unique_staff_placeholder_mobile(db: AsyncSession) -> str:
+    """Staff POS logins do not need a real phone; mobile must be unique in business_owners."""
+    for _ in range(20):
+        suffix = f"{secrets.randbelow(10 ** 8):08d}"
+        candidate = f"+9199{suffix}"
+        exists = await db.execute(
+            select(BusinessOwner.id).where(BusinessOwner.mobile == candidate),
+        )
+        if exists.scalar_one_or_none() is None:
+            return candidate
+    raise HTTPException(status_code=500, detail="Could not allocate staff mobile placeholder")
 
 
 class PlatformOnboardingService:
@@ -80,6 +95,19 @@ class PlatformOnboardingService:
             else TenantStatus.DRAFT
         )
 
+        if payload.assigned_sales_employee_id:
+            sales_check = await self.db.execute(
+                select(PlatformSalesEmployee.id).where(
+                    PlatformSalesEmployee.id == payload.assigned_sales_employee_id,
+                    PlatformSalesEmployee.is_active.is_(True),
+                ),
+            )
+            if sales_check.scalar_one_or_none() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid sales employee",
+                )
+
         business = Business(
             legal_name=payload.business.legal_name.strip(),
             business_type=payload.business.business_type,
@@ -95,6 +123,7 @@ class PlatformOnboardingService:
             status=tenant_status,
             internal_notes=payload.business.internal_notes,
             onboarded_by_admin_id=admin.id,
+            assigned_sales_employee_id=payload.assigned_sales_employee_id,
         )
         self.db.add(business)
         await self.db.flush()
@@ -130,9 +159,28 @@ class PlatformOnboardingService:
             username=username,
             password_hash=password_hash,
             must_change_password=True,
+            role=OwnerRole.OWNER,
             is_active=True,
         )
         self.db.add(owner)
+
+        staff_credentials: list[OwnerCredentialsOnce] = []
+        for seat_idx in range(payload.staff.admin_seats):
+            staff_credentials.append(
+                await self._create_staff_login(
+                    business,
+                    role=OwnerRole.ADMIN,
+                    label=f"admin{seat_idx + 1}",
+                ),
+            )
+        for seat_idx in range(payload.staff.worker_seats):
+            staff_credentials.append(
+                await self._create_staff_login(
+                    business,
+                    role=OwnerRole.WORKER,
+                    label=f"worker{seat_idx + 1}",
+                ),
+            )
 
         audit = PlatformAuditLog(
             admin_id=admin.id,
@@ -144,7 +192,23 @@ class PlatformOnboardingService:
             ),
         )
         self.db.add(audit)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            err = str(exc.orig) if exc.orig else str(exc)
+            if "uq_business_owners_mobile" in err or "uq_business_owners_email" in err:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Owner email or mobile already registered",
+                ) from exc
+            if "uq_business_owners_username" in err:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Could not allocate a unique owner username; try again",
+                ) from exc
+            raise
+
         await self.db.refresh(business)
         await self.db.refresh(outlet)
         await self.db.refresh(owner)
@@ -159,7 +223,32 @@ class PlatformOnboardingService:
                 username=username,
                 temporary_password=temp_password,
             ),
+            staff_credentials=staff_credentials,
         )
+
+    async def _create_staff_login(
+        self,
+        business: Business,
+        role: OwnerRole,
+        label: str,
+    ) -> OwnerCredentialsOnce:
+        temp_password = generate_secure_password(14)
+        username = await _unique_owner_username(self.db, f"{business.legal_name}-{label}")
+        password_hash = hash_password(temp_password)
+        staff_mobile = await _unique_staff_placeholder_mobile(self.db)
+        staff = BusinessOwner(
+            business_id=business.id,
+            full_name=f"{business.legal_name} {label}",
+            email=f"{label}-{secrets.token_hex(3)}@staff.khatababu.local",
+            mobile=staff_mobile,
+            username=username,
+            password_hash=password_hash,
+            must_change_password=True,
+            role=role,
+            is_active=True,
+        )
+        self.db.add(staff)
+        return OwnerCredentialsOnce(username=username, temporary_password=temp_password)
 
     async def list_tenants(self) -> list[TenantSummary]:
         result = await self.db.execute(

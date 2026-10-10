@@ -56,6 +56,11 @@ class Business(Base, TimestampMixin):
         ForeignKey("platform_admins.id", ondelete="SET NULL"),
         nullable=True,
     )
+    assigned_sales_employee_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_sales_employees.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     analytics_pin_hash: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     outlets: Mapped[list["Outlet"]] = relationship(back_populates="business", cascade="all, delete-orphan")
@@ -118,6 +123,11 @@ class Outlet(Base, TimestampMixin):
     )
     pos_orders: Mapped[list["PosOrder"]] = relationship(
         "PosOrder",
+        back_populates="outlet",
+        cascade="all, delete-orphan",
+    )
+    inventory_items: Mapped[list["InventoryItem"]] = relationship(
+        "InventoryItem",
         back_populates="outlet",
         cascade="all, delete-orphan",
     )

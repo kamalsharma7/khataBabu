@@ -69,6 +69,7 @@ def _attach_modifiers(
                 price=v.price,
                 sort_order=v.sort_order if v.sort_order else idx,
                 is_default=v.is_default,
+                weight_grams=v.weight_grams,
             ),
         )
     for idx, a in enumerate(addons):
@@ -78,6 +79,7 @@ def _attach_modifiers(
                 price=a.price,
                 sort_order=a.sort_order if a.sort_order else idx,
                 is_available=a.is_available,
+                weight_grams=a.weight_grams,
             ),
         )
 
@@ -179,6 +181,9 @@ class OwnerMenuService:
             food_type=food_type,
             is_available=payload.is_available,
             sort_order=payload.sort_order,
+            gst_applicable=payload.gst_applicable,
+            cgst_percent=payload.cgst_percent if payload.gst_applicable else Decimal("0"),
+            sgst_percent=payload.sgst_percent if payload.gst_applicable else Decimal("0"),
         )
         _attach_modifiers(item, payload.variations, payload.addons)
         self.db.add(item)
@@ -216,6 +221,19 @@ class OwnerMenuService:
             item.is_available = payload.is_available
         if payload.sort_order is not None:
             item.sort_order = payload.sort_order
+        if payload.gst_applicable is not None:
+            item.gst_applicable = payload.gst_applicable
+        if payload.cgst_percent is not None:
+            item.cgst_percent = payload.cgst_percent
+        if payload.sgst_percent is not None:
+            item.sgst_percent = payload.sgst_percent
+        if item.gst_applicable:
+            if item.cgst_percent <= 0 and item.sgst_percent <= 0:
+                item.cgst_percent = Decimal("2.5")
+                item.sgst_percent = Decimal("2.5")
+        else:
+            item.cgst_percent = Decimal("0")
+            item.sgst_percent = Decimal("0")
         await self.db.commit()
         return await self._get_item_loaded(owner, outlet_id, item_id)
 
