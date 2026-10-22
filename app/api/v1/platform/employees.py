@@ -10,6 +10,7 @@ from app.db.deps import get_db
 from app.models.platform_admin import PlatformAdmin
 from app.schemas.platform.sales_employee import (
     SalesEmployeeCreate,
+    SalesEmployeeDetailResponse,
     SalesEmployeeResponse,
     SalesEmployeeUpdate,
 )
@@ -25,8 +26,17 @@ async def list_sales_employees(
     admin: PlatformAdmin = Depends(get_current_platform_admin),
 ) -> list[SalesEmployeeResponse]:
     service = PlatformSalesEmployeeService(db)
-    rows = await service.list_employees(active_only=active_only)
-    return [SalesEmployeeResponse.model_validate(r) for r in rows]
+    return await service.list_employees(active_only=active_only)
+
+
+@router.get("/sales-employees/{employee_id}", response_model=SalesEmployeeDetailResponse)
+async def get_sales_employee(
+    employee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: PlatformAdmin = Depends(get_current_platform_admin),
+) -> SalesEmployeeDetailResponse:
+    service = PlatformSalesEmployeeService(db)
+    return await service.get_employee(employee_id)
 
 
 @router.post("/sales-employees", response_model=SalesEmployeeResponse, status_code=status.HTTP_201_CREATED)
@@ -36,8 +46,7 @@ async def create_sales_employee(
     admin: PlatformAdmin = Depends(get_current_platform_admin),
 ) -> SalesEmployeeResponse:
     service = PlatformSalesEmployeeService(db)
-    row = await service.create(body)
-    return SalesEmployeeResponse.model_validate(row)
+    return await service.create(body)
 
 
 @router.patch("/sales-employees/{employee_id}", response_model=SalesEmployeeResponse)
@@ -48,5 +57,4 @@ async def update_sales_employee(
     admin: PlatformAdmin = Depends(get_current_platform_admin),
 ) -> SalesEmployeeResponse:
     service = PlatformSalesEmployeeService(db)
-    row = await service.update(employee_id, body)
-    return SalesEmployeeResponse.model_validate(row)
+    return await service.update(employee_id, body)

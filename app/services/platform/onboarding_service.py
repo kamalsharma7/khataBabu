@@ -12,16 +12,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.security import generate_secure_password, hash_password, verify_password
-from app.models.enums import OwnerRole, TenantStatus
+from app.models.enums import (
+    OperatingModel,
+    OwnerRole,
+    SalesEmploymentStatus,
+    TenantStatus,
+    VenueKind,
+)
 from app.models.platform_admin import PlatformAuditLog, PlatformAdmin
 from app.models.platform_sales import PlatformSalesEmployee
 from app.models.tenant import Business, BusinessOwner, Outlet
 from app.schemas.platform.onboarding import (
+    OwnerCredentialsOnce,
+    TenantDetailResponse,
     TenantOnboardingCreateRequest,
     TenantOnboardingCreateResponse,
+    TenantOwnerSummary,
     TenantStatusUpdateRequest,
     TenantSummary,
-    OwnerCredentialsOnce,
+    TenantUpdateRequest,
 )
 
 
@@ -99,7 +108,7 @@ class PlatformOnboardingService:
             sales_check = await self.db.execute(
                 select(PlatformSalesEmployee.id).where(
                     PlatformSalesEmployee.id == payload.assigned_sales_employee_id,
-                    PlatformSalesEmployee.is_active.is_(True),
+                    PlatformSalesEmployee.employment_status == SalesEmploymentStatus.ACTIVE,
                 ),
             )
             if sales_check.scalar_one_or_none() is None:
@@ -165,22 +174,14 @@ class PlatformOnboardingService:
         self.db.add(owner)
 
         staff_credentials: list[OwnerCredentialsOnce] = []
-        for seat_idx in range(payload.staff.admin_seats):
-            staff_credentials.append(
-                await self._create_staff_login(
-                    business,
-                    role=OwnerRole.ADMIN,
-                    label=f"admin{seat_idx + 1}",
-                ),
-            )
-        for seat_idx in range(payload.staff.worker_seats):
-            staff_credentials.append(
-                await self._create_staff_login(
-                    business,
-                    role=OwnerRole.WORKER,
-                    label=f"worker{seat_idx + 1}",
-                ),
-            )
+        staff_credentials.append(
+            await self._create_staff_login(
+                business,
+                role=OwnerRole.EMPLOYEE,
+                label="receptionist",
+                full_name="Receptionist",
+            ),
+        )
 
         audit = PlatformAuditLog(
             admin_id=admin.id,
@@ -222,6 +223,7 @@ class PlatformOnboardingService:
             owner_credentials=OwnerCredentialsOnce(
                 username=username,
                 temporary_password=temp_password,
+                role=OwnerRole.OWNER.value,
             ),
             staff_credentials=staff_credentials,
         )
@@ -231,14 +233,16 @@ class PlatformOnboardingService:
         business: Business,
         role: OwnerRole,
         label: str,
+        full_name: str | None = None,
     ) -> OwnerCredentialsOnce:
         temp_password = generate_secure_password(14)
         username = await _unique_owner_username(self.db, f"{business.legal_name}-{label}")
         password_hash = hash_password(temp_password)
         staff_mobile = await _unique_staff_placeholder_mobile(self.db)
+        display = full_name or f"{business.legal_name} {label}"
         staff = BusinessOwner(
             business_id=business.id,
-            full_name=f"{business.legal_name} {label}",
+            full_name=display,
             email=f"{label}-{secrets.token_hex(3)}@staff.khatababu.local",
             mobile=staff_mobile,
             username=username,
@@ -248,7 +252,184 @@ class PlatformOnboardingService:
             is_active=True,
         )
         self.db.add(staff)
-        return OwnerCredentialsOnce(username=username, temporary_password=temp_password)
+        return OwnerCredentialsOnce(
+            username=username,
+            temporary_password=temp_password,
+            role=role.value,
+        )
+
+    async def _business_detail(
+        self,
+        business: Business,
+        outlet: Outlet,
+        owner: BusinessOwner,
+        sales_name: str | None,
+    ) -> TenantDetailResponse:
+        return TenantDetailResponse(
+            business_id=business.id,
+            outlet_id=outlet.id,
+            status=business.status,
+            legal_name=business.legal_name,
+            business_type=business.business_type,
+            primary_phone=business.primary_phone,
+            primary_email=business.primary_email,
+            city=business.city,
+            state=business.state,
+            gst_registered=business.gst_registered,
+            gstin=business.gstin,
+            fssai=business.fssai,
+            pan=business.pan,
+            plan_tier=business.plan_tier,
+            internal_notes=business.internal_notes,
+            assigned_sales_employee_id=business.assigned_sales_employee_id,
+            assigned_sales_employee_name=sales_name,
+            outlet_name=outlet.name,
+            address_line=outlet.address_line,
+            pincode=outlet.pincode,
+            outlet_phone=outlet.outlet_phone,
+            operating_models=[OperatingModel(m) for m in outlet.operating_models],
+            venue_kinds=[VenueKind(k) for k in outlet.venue_kinds],
+            time_based_billing_enabled=outlet.time_based_billing_enabled,
+            rough_scale_notes=outlet.rough_scale_notes,
+            outlet_ref_code=outlet.ref_code,
+            owner=TenantOwnerSummary(
+                id=owner.id,
+                full_name=owner.full_name,
+                email=owner.email,
+                mobile=owner.mobile,
+                username=owner.username,
+                role=owner.role.value if hasattr(owner.role, "value") else str(owner.role),
+            ),
+            created_at=business.created_at.isoformat(),
+        )
+
+    async def get_tenant_detail(self, business_id: uuid.UUID) -> TenantDetailResponse:
+        result = await self.db.execute(
+            select(Business)
+            .where(Business.id == business_id)
+            .options(selectinload(Business.outlets), selectinload(Business.owners)),
+        )
+        business = result.scalar_one_or_none()
+        if business is None or not business.outlets:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business not found")
+        outlet = business.outlets[0]
+        owner = next((o for o in business.owners if o.role == OwnerRole.OWNER), None)
+        if owner is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+        sales_name: str | None = None
+        if business.assigned_sales_employee_id:
+            sales_row = await self.db.execute(
+                select(PlatformSalesEmployee.full_name).where(
+                    PlatformSalesEmployee.id == business.assigned_sales_employee_id,
+                ),
+            )
+            sales_name = sales_row.scalar_one_or_none()
+        return await self._business_detail(business, outlet, owner, sales_name)
+
+    async def update_tenant(
+        self,
+        business_id: uuid.UUID,
+        payload: TenantUpdateRequest,
+        admin: PlatformAdmin,
+    ) -> TenantDetailResponse:
+        result = await self.db.execute(
+            select(Business)
+            .where(Business.id == business_id)
+            .options(selectinload(Business.outlets), selectinload(Business.owners)),
+        )
+        business = result.scalar_one_or_none()
+        if business is None or not business.outlets:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business not found")
+        outlet = business.outlets[0]
+        owner = next((o for o in business.owners if o.role == OwnerRole.OWNER), None)
+        if owner is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+        if payload.legal_name is not None:
+            business.legal_name = payload.legal_name.strip()
+        if payload.business_type is not None:
+            business.business_type = payload.business_type
+        if payload.primary_phone is not None:
+            business.primary_phone = payload.primary_phone
+        if payload.primary_email is not None:
+            business.primary_email = str(payload.primary_email).lower()
+        if payload.city is not None:
+            business.city = payload.city.strip()
+        if payload.state is not None:
+            business.state = payload.state.strip()
+        if payload.gst_registered is not None:
+            business.gst_registered = payload.gst_registered
+        if payload.gstin is not None:
+            business.gstin = payload.gstin.strip().upper() if payload.gstin else None
+        if payload.fssai is not None:
+            business.fssai = payload.fssai.strip() or None
+        if payload.pan is not None:
+            business.pan = payload.pan.strip().upper() or None
+        if payload.plan_tier is not None:
+            business.plan_tier = payload.plan_tier
+        if payload.internal_notes is not None:
+            business.internal_notes = payload.internal_notes.strip() or None
+        if payload.assigned_sales_employee_id is not None:
+            if payload.assigned_sales_employee_id:
+                sales_check = await self.db.execute(
+                    select(PlatformSalesEmployee.id).where(
+                        PlatformSalesEmployee.id == payload.assigned_sales_employee_id,
+                    ),
+                )
+                if sales_check.scalar_one_or_none() is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid sales employee",
+                    )
+            business.assigned_sales_employee_id = payload.assigned_sales_employee_id
+
+        if payload.outlet_name is not None:
+            outlet.name = payload.outlet_name.strip()
+        if payload.address_line is not None:
+            outlet.address_line = payload.address_line.strip()
+        if payload.pincode is not None:
+            outlet.pincode = payload.pincode.strip()
+        if payload.outlet_phone is not None:
+            outlet.outlet_phone = payload.outlet_phone
+        if payload.operating_models is not None:
+            outlet.operating_models = [m.value for m in payload.operating_models]
+        if payload.venue_kinds is not None:
+            outlet.venue_kinds = [k.value for k in payload.venue_kinds]
+        if payload.time_based_billing_enabled is not None:
+            outlet.time_based_billing_enabled = payload.time_based_billing_enabled
+        if payload.rough_scale_notes is not None:
+            outlet.rough_scale_notes = payload.rough_scale_notes.strip() or None
+
+        if payload.owner_full_name is not None:
+            owner.full_name = payload.owner_full_name.strip()
+        if payload.owner_email is not None:
+            owner.email = str(payload.owner_email).lower()
+        if payload.owner_mobile is not None:
+            owner.mobile = payload.owner_mobile
+
+        audit = PlatformAuditLog(
+            admin_id=admin.id,
+            action="tenant_updated",
+            resource_type="business",
+            resource_id=str(business.id),
+            metadata_json="{}",
+        )
+        self.db.add(audit)
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            err = str(exc.orig) if exc.orig else str(exc)
+            if "uq_business_owners_mobile" in err or "uq_business_owners_email" in err:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Owner email or mobile already in use",
+                ) from exc
+            raise
+        await self.db.refresh(business)
+        await self.db.refresh(outlet)
+        await self.db.refresh(owner)
+        return await self.get_tenant_detail(business_id)
 
     async def list_tenants(self) -> list[TenantSummary]:
         result = await self.db.execute(

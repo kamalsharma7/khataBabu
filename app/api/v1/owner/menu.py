@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.owner import get_current_owner
+from app.api.deps.permissions import require_permission
+from app.services.owner.permissions import PERM_POS_MENU
 from app.db.deps import get_db
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.menu import (
@@ -19,7 +21,10 @@ from app.schemas.owner.menu import (
 )
 from app.services.owner.menu_service import OwnerMenuService
 
-router = APIRouter(prefix="/outlets/{outlet_id}/menu")
+router = APIRouter(
+    prefix="/outlets/{outlet_id}/menu",
+    dependencies=[Depends(require_permission(PERM_POS_MENU))],
+)
 
 
 @router.get("/categories", response_model=list[MenuCategoryResponse])

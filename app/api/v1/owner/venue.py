@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.owner import get_current_owner
+from app.api.deps.permissions import require_permission
+from app.services.owner.permissions import PERM_POS_FLOOR
 from app.db.deps import get_db
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.venue import (
@@ -19,7 +21,10 @@ from app.schemas.owner.venue import (
 )
 from app.services.owner.venue_service import OwnerVenueService
 
-router = APIRouter(prefix="/outlets/{outlet_id}")
+router = APIRouter(
+    prefix="/outlets/{outlet_id}",
+    dependencies=[Depends(require_permission(PERM_POS_FLOOR))],
+)
 
 
 @router.get("/areas", response_model=list[AreaResponse])

@@ -47,6 +47,10 @@ class OrderUpdate(BaseModel):
     time_session_start: Optional[datetime] = None
     time_session_end: Optional[datetime] = None
     clear_time_session: Optional[bool] = None
+    time_billing_excluded: Optional[bool] = Field(
+        default=None,
+        description="When true, bill food/items only — no table time charge (owner)",
+    )
 
 
 class OrderCancel(BaseModel):
@@ -93,6 +97,7 @@ class BillPreviewRequest(BaseModel):
     tax_percent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     tip_amount: Decimal = Field(default=Decimal("0"), ge=0)
     round_to_rupee: bool = True
+    manager_approval_pin: Optional[str] = Field(default=None, max_length=12)
 
 
 class SaveOrderBillRequest(BillPreviewRequest):
@@ -168,6 +173,7 @@ class KotLineResponse(BaseModel):
     quantity: int
     item_name: str
     variation_name: Optional[str]
+    addon_names: list[str] = Field(default_factory=list)
     notes: Optional[str]
 
 
@@ -212,6 +218,9 @@ class BillResponse(BaseModel):
     balance_due: Decimal = Decimal("0")
     status: BillStatus
     payments: list[BillPaymentResponse] = Field(default_factory=list)
+    invoice_number: Optional[int] = None
+    invoice_code: Optional[str] = None
+    refunded_total: Decimal = Decimal("0")
 
     model_config = {"from_attributes": True}
 
@@ -253,6 +262,7 @@ class OrderResponse(BaseModel):
     customer_mobile: Optional[str] = None
     customer_locality: Optional[str] = None
     customer_relation: Optional[CustomerRelation] = None
+    customer_id: Optional[UUID] = None
     bill_saved_at: Optional[datetime] = None
     pay_later: bool = False
     notes: Optional[str]
@@ -263,6 +273,7 @@ class OrderResponse(BaseModel):
     time_billed_minutes: Optional[int] = None
     hourly_rate_snapshot: Optional[Decimal] = None
     time_charge: Optional[Decimal] = None
+    time_billing_excluded: bool = False
     lines: list[OrderLineResponse] = Field(default_factory=list)
     running_subtotal: Decimal = Decimal("0")
     warnings: list[str] = Field(

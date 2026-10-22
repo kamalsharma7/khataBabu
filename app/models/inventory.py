@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Optional
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from datetime import date
+
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,8 +39,15 @@ class InventoryItem(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     unit: Mapped[str] = mapped_column(String(32), nullable=False, default="pcs")
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="grocery")
     current_stock: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False, default=0)
     low_stock_threshold: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
+    cost_per_unit: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    tracks_daily: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    daily_par: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
+    stock_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    today_opening: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
 
     outlet: Mapped["Outlet"] = relationship(back_populates="inventory_items")
     menu_links: Mapped[list["MenuItemInventoryLink"]] = relationship(

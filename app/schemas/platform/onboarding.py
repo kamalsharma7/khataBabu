@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
+from app.data.india_territory import validate_state_city
 from app.models.enums import BusinessType, OperatingModel, PlanTier, TenantStatus, VenueKind
 
 
@@ -84,12 +85,12 @@ class BusinessOnboardingInput(BaseModel):
             raise ValueError("GSTIN is required when gst_registered is true")
         return self
 
-
-class StaffProvisioningInput(BaseModel):
-    """Extra POS logins created at onboarding (owner login is always created)."""
-
-    admin_seats: int = Field(default=0, ge=0, le=5)
-    worker_seats: int = Field(default=0, ge=0, le=20)
+    @model_validator(mode="after")
+    def normalize_territory(self) -> "BusinessOnboardingInput":
+        state, city = validate_state_city(self.state, self.city)
+        self.state = state
+        self.city = city
+        return self
 
 
 class TenantOnboardingCreateRequest(BaseModel):
@@ -97,13 +98,13 @@ class TenantOnboardingCreateRequest(BaseModel):
     owner: OwnerOnboardingInput
     outlet: OutletOnboardingInput
     assigned_sales_employee_id: UUID | None = None
-    staff: StaffProvisioningInput = Field(default_factory=StaffProvisioningInput)
 
 
 class OwnerCredentialsOnce(BaseModel):
     username: str
     temporary_password: str
     must_change_password: bool = True
+    role: str = Field(description="owner | admin | employee")
 
 
 class TenantOnboardingCreateResponse(BaseModel):
@@ -133,6 +134,105 @@ class TenantSummary(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+class TenantOwnerSummary(BaseModel):
+    id: UUID
+    full_name: str
+    email: str
+    mobile: str
+    username: str
+    role: str
+
+
+class TenantDetailResponse(BaseModel):
+    business_id: UUID
+    outlet_id: UUID
+    status: TenantStatus
+    legal_name: str
+    business_type: BusinessType
+    primary_phone: str
+    primary_email: str
+    city: str
+    state: str
+    gst_registered: bool
+    gstin: Optional[str]
+    fssai: Optional[str]
+    pan: Optional[str]
+    plan_tier: PlanTier
+    internal_notes: Optional[str]
+    assigned_sales_employee_id: UUID | None
+    assigned_sales_employee_name: str | None = None
+    outlet_name: str
+    address_line: str
+    pincode: str
+    outlet_phone: Optional[str]
+    operating_models: list[OperatingModel]
+    venue_kinds: list[VenueKind]
+    time_based_billing_enabled: bool
+    rough_scale_notes: Optional[str]
+    outlet_ref_code: str
+    owner: TenantOwnerSummary
+    created_at: str
+
+
+class TenantUpdateRequest(BaseModel):
+    legal_name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    business_type: Optional[BusinessType] = None
+    primary_phone: Optional[str] = None
+    primary_email: Optional[EmailStr] = None
+    city: Optional[str] = Field(default=None, min_length=2, max_length=128)
+    state: Optional[str] = Field(default=None, min_length=2, max_length=128)
+    gst_registered: Optional[bool] = None
+    gstin: Optional[str] = Field(default=None, max_length=15)
+    fssai: Optional[str] = Field(default=None, max_length=32)
+    pan: Optional[str] = Field(default=None, max_length=10)
+    plan_tier: Optional[PlanTier] = None
+    internal_notes: Optional[str] = Field(default=None, max_length=2000)
+    assigned_sales_employee_id: UUID | None = None
+    outlet_name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    address_line: Optional[str] = Field(default=None, min_length=5, max_length=512)
+    pincode: Optional[str] = Field(default=None, min_length=6, max_length=12)
+    outlet_phone: Optional[str] = None
+    operating_models: Optional[list[OperatingModel]] = None
+    venue_kinds: Optional[list[VenueKind]] = None
+    time_based_billing_enabled: Optional[bool] = None
+    rough_scale_notes: Optional[str] = Field(default=None, max_length=512)
+    owner_full_name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    owner_email: Optional[EmailStr] = None
+    owner_mobile: Optional[str] = None
+
+    @field_validator("primary_phone")
+    @classmethod
+    def validate_primary_phone(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _normalize_mobile(value)
+
+    @field_validator("owner_mobile")
+    @classmethod
+    def validate_owner_mobile(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _normalize_mobile(value)
+
+    @field_validator("outlet_phone")
+    @classmethod
+    def validate_outlet_phone_patch(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value.strip() == "":
+            return None
+        return _normalize_mobile(value)
+
+    @model_validator(mode="after")
+    def normalize_territory(self) -> "TenantUpdateRequest":
+        if self.state is None and self.city is None:
+            return self
+        if self.state is None or self.city is None:
+            raise ValueError("City and state must be updated together")
+        state, city = validate_state_city(self.state, self.city)
+        self.state = state
+        self.city = city
+        return self
 
 
 class TenantStatusUpdateRequest(BaseModel):

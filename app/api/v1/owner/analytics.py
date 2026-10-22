@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.analytics import require_analytics_unlock
 from app.api.deps.owner import get_current_owner
+from app.api.deps.permissions import require_permission
+from app.services.owner.permissions import PERM_ANALYTICS
 from app.core.config import Settings, get_settings
 from app.db.deps import get_db
 from app.models.tenant import BusinessOwner
@@ -57,7 +59,8 @@ async def analytics_summary(
     outlet_id: uuid.UUID,
     from_datetime: datetime = Query(..., description="Range start (ISO 8601, with timezone)"),
     to_datetime: datetime = Query(..., description="Range end (ISO 8601, with timezone)"),
-    owner: BusinessOwner = Depends(require_analytics_unlock),
+    owner: BusinessOwner = Depends(require_permission(PERM_ANALYTICS)),
+    _unlock: BusinessOwner = Depends(require_analytics_unlock),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AnalyticsSummaryResponse:
@@ -72,7 +75,8 @@ async def analytics_orders(
     to_datetime: datetime = Query(...),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
-    owner: BusinessOwner = Depends(require_analytics_unlock),
+    owner: BusinessOwner = Depends(require_permission(PERM_ANALYTICS)),
+    _unlock: BusinessOwner = Depends(require_analytics_unlock),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AnalyticsOrdersResponse:

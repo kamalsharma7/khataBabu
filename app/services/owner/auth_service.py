@@ -28,27 +28,7 @@ from app.schemas.owner.auth import (
 logger = logging.getLogger(__name__)
 
 
-def permissions_for_role(role: OwnerRole) -> list[str]:
-    if role == OwnerRole.WORKER:
-        return ["pos.billing"]
-    if role == OwnerRole.ADMIN:
-        return [
-            "pos.billing",
-            "pos.menu",
-            "pos.floor",
-            "pos.inventory",
-            "pos.bills",
-            "analytics.overview",
-        ]
-    return [
-        "pos.billing",
-        "pos.menu",
-        "pos.floor",
-        "pos.inventory",
-        "pos.bills",
-        "analytics.overview",
-        "settings.all",
-    ]
+from app.services.owner.permissions import permissions_for_role  # noqa: F401 — re-exported for tests
 
 
 class OwnerAuthService:

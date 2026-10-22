@@ -9,10 +9,12 @@ from app.api.deps.platform import get_current_platform_admin
 from app.db.deps import get_db
 from app.models.platform_admin import PlatformAdmin
 from app.schemas.platform.onboarding import (
+    TenantDetailResponse,
     TenantOnboardingCreateRequest,
     TenantOnboardingCreateResponse,
     TenantStatusUpdateRequest,
     TenantSummary,
+    TenantUpdateRequest,
 )
 from app.services.platform.onboarding_service import PlatformOnboardingService
 
@@ -27,6 +29,27 @@ async def create_tenant(
 ) -> TenantOnboardingCreateResponse:
     service = PlatformOnboardingService(db)
     return await service.create_tenant(body, admin)
+
+
+@router.get("/tenants/{business_id}", response_model=TenantDetailResponse)
+async def get_tenant(
+    business_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: PlatformAdmin = Depends(get_current_platform_admin),
+) -> TenantDetailResponse:
+    service = PlatformOnboardingService(db)
+    return await service.get_tenant_detail(business_id)
+
+
+@router.patch("/tenants/{business_id}", response_model=TenantDetailResponse)
+async def update_tenant(
+    business_id: uuid.UUID,
+    body: TenantUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: PlatformAdmin = Depends(get_current_platform_admin),
+) -> TenantDetailResponse:
+    service = PlatformOnboardingService(db)
+    return await service.update_tenant(business_id, body, admin)
 
 
 @router.get("/tenants", response_model=list[TenantSummary])

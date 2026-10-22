@@ -4,12 +4,13 @@ import uuid
 from decimal import Decimal
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import FoodType
 from app.models.menu import MenuCategory, MenuItem, MenuItemAddon, MenuItemVariation
+from app.models.order import PosOrderLine
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.menu import (
     MenuAddonInput,
@@ -32,17 +33,14 @@ def _food_type_from_payload(food_type: FoodType | None, is_veg: bool) -> FoodTyp
 def _normalize_variations(variations: list[MenuVariationInput]) -> list[MenuVariationInput]:
     if not variations:
         return []
-    if not any(v.is_default for v in variations):
-        first = variations[0]
-        return [
-            MenuVariationInput(
-                name=first.name,
-                price=first.price,
-                sort_order=first.sort_order,
-                is_default=True,
-            ),
-            *variations[1:],
-        ]
+    default_count = sum(1 for v in variations if v.is_default)
+    if default_count > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only one variation can be marked as default",
+        )
+    if default_count == 0:
+        return [variations[0].model_copy(update={"is_default": True}), *variations[1:]]
     return variations
 
 
@@ -69,7 +67,9 @@ def _attach_modifiers(
                 price=v.price,
                 sort_order=v.sort_order if v.sort_order else idx,
                 is_default=v.is_default,
+                is_available=v.is_available,
                 weight_grams=v.weight_grams,
+                food_type=v.food_type,
             ),
         )
     for idx, a in enumerate(addons):
@@ -80,6 +80,7 @@ def _attach_modifiers(
                 sort_order=a.sort_order if a.sort_order else idx,
                 is_available=a.is_available,
                 weight_grams=a.weight_grams,
+                food_type=a.food_type,
             ),
         )
 
@@ -144,6 +145,14 @@ class OwnerMenuService:
     ) -> None:
         assert_business_operational(owner.business)
         category = await self._get_category(owner, outlet_id, category_id)
+        item_ids = await self.db.scalars(
+            select(MenuItem.id).where(
+                MenuItem.category_id == category_id,
+                MenuItem.outlet_id == outlet_id,
+            ),
+        )
+        for menu_item_id in item_ids:
+            await self._detach_menu_item_from_order_lines(menu_item_id)
         await self.db.delete(category)
         await self.db.commit()
 
@@ -262,8 +271,17 @@ class OwnerMenuService:
     ) -> None:
         assert_business_operational(owner.business)
         item = await self._get_item(owner, outlet_id, item_id)
+        await self._detach_menu_item_from_order_lines(item.id)
         await self.db.delete(item)
         await self.db.commit()
+
+    async def _detach_menu_item_from_order_lines(self, menu_item_id: uuid.UUID) -> None:
+        """Keep billed/KOT history; order lines store item_name snapshots."""
+        await self.db.execute(
+            update(PosOrderLine)
+            .where(PosOrderLine.menu_item_id == menu_item_id)
+            .values(menu_item_id=None),
+        )
 
     async def _get_category(
         self,

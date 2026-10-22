@@ -29,7 +29,10 @@ def order_subtotal(order: PosOrder) -> Decimal:
 def order_effective_subtotal(order: PosOrder, lines: list[PosOrderLine] | None = None) -> Decimal:
     source = lines if lines is not None else order.lines
     base = subtotal_from_lines(source)
-    charge = order.time_charge if order.time_charge is not None else Decimal("0")
+    if getattr(order, "time_billing_excluded", False):
+        charge = Decimal("0")
+    else:
+        charge = order.time_charge if order.time_charge is not None else Decimal("0")
     return money(base + charge)
 
 

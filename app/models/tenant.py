@@ -161,7 +161,12 @@ class BusinessOwner(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     role: Mapped[OwnerRole] = mapped_column(
-        Enum(OwnerRole, name="owner_role", native_enum=False),
+        Enum(
+            OwnerRole,
+            name="owner_role",
+            native_enum=False,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
         nullable=False,
         default=OwnerRole.OWNER,
     )

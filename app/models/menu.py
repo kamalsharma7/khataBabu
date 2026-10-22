@@ -123,7 +123,17 @@ class MenuItemVariation(Base, TimestampMixin):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     weight_grams: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    food_type: Mapped[Optional[FoodType]] = mapped_column(
+        Enum(
+            FoodType,
+            name="food_type",
+            native_enum=False,
+            values_callable=lambda choices: [c.value for c in choices],
+        ),
+        nullable=True,
+    )
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="variations")
 
@@ -149,5 +159,14 @@ class MenuItemAddon(Base, TimestampMixin):
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     weight_grams: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    food_type: Mapped[Optional[FoodType]] = mapped_column(
+        Enum(
+            FoodType,
+            name="food_type",
+            native_enum=False,
+            values_callable=lambda choices: [c.value for c in choices],
+        ),
+        nullable=True,
+    )
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="addons")

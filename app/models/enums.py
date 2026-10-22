@@ -27,7 +27,45 @@ class PlanTier(str, enum.Enum):
 class OwnerRole(str, enum.Enum):
     OWNER = "owner"
     ADMIN = "admin"
+    EMPLOYEE = "employee"
     WORKER = "worker"
+
+
+class SalesEmploymentStatus(str, enum.Enum):
+    ACTIVE = "active"
+    BLOCKED = "blocked"
+    SUSPENDED = "suspended"
+    LEFT = "left"
+    PART_TIME = "part_time"
+    PROBATION = "probation"
+    ON_LEAVE = "on_leave"
+
+
+class SalesBehaviorStatus(str, enum.Enum):
+    GOOD = "good"
+    IN_DOUBT = "in_doubt"
+    ANGRY = "angry"
+    SHARP = "sharp"
+    COOPERATIVE = "cooperative"
+    NEEDS_ATTENTION = "needs_attention"
+
+
+class SalesProfessionalStatus(str, enum.Enum):
+    GOOD = "good"
+    SALES_EXPERT = "sales_expert"
+    SHARP = "sharp"
+    FRESHER = "fresher"
+    RISING_STAR = "rising_star"
+    MENTOR = "mentor"
+
+
+class PlatformExpenditureCategory(str, enum.Enum):
+    SALES_TEAM_SALARY = "sales_team_salary"
+    CA_EXPENSES = "ca_expenses"
+    IT_COST = "it_cost"
+    MARKETING_COST = "marketing_cost"
+    TRAVEL_COST = "travel_cost"
+    OTHER = "other"
 
 
 class CustomerRelation(str, enum.Enum):

@@ -59,8 +59,13 @@ from app.schemas.owner.order import (
     SplitBillPreviewResponse,
 )
 from app.services.owner.access import assert_business_operational, get_outlet_for_owner
+from app.services.owner.audit_service import TenantAuditService
+from app.services.owner.business_settings_service import BusinessSettingsService
+from app.services.owner.discount_policy import assert_discount_allowed
+from app.services.owner.invoice_service import InvoiceService
 from app.services.owner.order_counters import next_outlet_counter
 from app.services.owner.inventory_service import OwnerInventoryService
+from app.services.owner.menu_food_type import effective_food_type, pick_default_variation
 from app.services.owner.order_pricing import (
     compute_bill_totals,
     compute_item_gst_breakdown,
@@ -303,20 +308,47 @@ class OwnerOrderService:
         self._assert_order_open(order)
         if payload.guest_count is not None:
             order.guest_count = payload.guest_count
+        customer_touched = False
         if payload.customer_name is not None:
             order.customer_name = payload.customer_name.strip() or None
+            customer_touched = True
         if payload.customer_mobile is not None:
             order.customer_mobile = payload.customer_mobile.strip() or None
+            customer_touched = True
         if payload.customer_locality is not None:
             order.customer_locality = payload.customer_locality.strip() or None
+            customer_touched = True
         if payload.customer_relation is not None:
             order.customer_relation = payload.customer_relation
+            customer_touched = True
+        if customer_touched:
+            from app.services.owner.customer_service import OwnerCustomerService
+
+            if order.customer_mobile:
+                await OwnerCustomerService(self.db).sync_order_customer(order, owner)
+            else:
+                order.customer_id = None
         if payload.order_type is not None:
             order.order_type = payload.order_type
         if payload.pay_later is not None:
             order.pay_later = payload.pay_later
         if payload.notes is not None:
             order.notes = payload.notes
+        if payload.time_billing_excluded is not None:
+            from app.services.owner.permissions import PERM_SETTINGS_ALL, has_permission
+
+            if not has_permission(owner.role, PERM_SETTINGS_ALL):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only the business owner can waive table time billing",
+                )
+            order.time_billing_excluded = payload.time_billing_excluded
+            if payload.time_billing_excluded:
+                order.time_session_start = None
+                order.time_session_end = None
+                order.time_billed_minutes = None
+                order.hourly_rate_snapshot = None
+                order.time_charge = None
         if (
             payload.time_duration_minutes is not None
             or payload.time_start_now
@@ -325,6 +357,11 @@ class OwnerOrderService:
             or payload.time_session_end is not None
             or payload.clear_time_session
         ):
+            if order.time_billing_excluded:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Table time is turned off for this bill. Re-enable table time first.",
+                )
             await self._apply_time_session_patch(owner, outlet_id, order, payload)
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
@@ -346,6 +383,16 @@ class OwnerOrderService:
         order.cancelled_at = datetime.now(timezone.utc)
         order.cancel_reason = reason
         await self._void_open_bills(order)
+        await TenantAuditService(self.db).log(
+            business_id=owner.business_id,
+            outlet_id=outlet_id,
+            actor=owner,
+            action="order.cancel",
+            entity_type="order",
+            entity_id=str(order.id),
+            summary=f"Cancelled order #{order.order_number}",
+            reason=reason,
+        )
         await self.db.commit()
         return await self._fresh_order(owner, outlet_id, order_id)
 
@@ -393,6 +440,23 @@ class OwnerOrderService:
         )
         unit_price = variation.price if variation else item.price
         addons_total = sum(a.price for a in addons)
+        inv = OwnerInventoryService(self.db)
+        pending_same_item = sum(
+            line.quantity
+            for line in order.lines
+            if line.menu_item_id == item.id and line.status == OrderLineStatus.PENDING_KOT
+        )
+        stock_warnings = await inv.check_stock_for_line(
+            outlet_id,
+            item.id,
+            pending_same_item + payload.quantity,
+            order.id,
+        )
+        if stock_warnings:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"inventory": stock_warnings, "message": stock_warnings[0]},
+            )
         row = PosOrderLine(
             order_id=order.id,
             menu_item_id=item.id,
@@ -404,7 +468,7 @@ class OwnerOrderService:
             addons_total=addons_total,
             line_total=line_total(unit_price, addons_total, payload.quantity),
             notes=payload.notes,
-            food_type=item.food_type,
+            food_type=effective_food_type(item, variation, addons),
             status=OrderLineStatus.PENDING_KOT,
         )
         for addon in addons:
@@ -417,12 +481,9 @@ class OwnerOrderService:
             )
         self.db.add(row)
         await self.db.flush()
-        inv = OwnerInventoryService(self.db)
-        stock_warnings = await inv.check_stock_for_line(outlet_id, item.id, payload.quantity)
         await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
-        response = await self._fresh_order(owner, outlet_id, order_id)
-        return response.model_copy(update={"warnings": stock_warnings})
+        return await self._fresh_order(owner, outlet_id, order_id)
 
     async def add_open_line(
         self,
@@ -532,6 +593,9 @@ class OwnerOrderService:
         line = self._get_line(order, line_id)
         if line.status == OrderLineStatus.CANCELLED:
             return self._order_response(order)
+        if line.status == OrderLineStatus.IN_KOT:
+            inv = OwnerInventoryService(self.db)
+            await inv.restore_for_order_line(outlet_id, line)
         line.status = OrderLineStatus.CANCELLED
         await self._maybe_refresh_open_bill(order.id)
         await self.db.commit()
@@ -554,6 +618,8 @@ class OwnerOrderService:
             pending = [line for line in pending if line.id in allowed]
         if not pending:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No items pending for KOT")
+        inv = OwnerInventoryService(self.db)
+        await inv.assert_stock_for_lines(outlet_id, pending)
         kot_number = await next_outlet_counter(self.db, outlet_id, "kot")
         kot = PosKot(
             outlet_id=outlet_id,
@@ -566,6 +632,7 @@ class OwnerOrderService:
             kot.lines.append(PosKotLine(order_line_id=line.id, quantity=line.quantity))
             line.status = OrderLineStatus.IN_KOT
         self.db.add(kot)
+        await inv.deduct_for_order_lines(outlet_id, pending, reason="kot")
         await self.db.commit()
         return await self.get_kot(owner, outlet_id, kot.id)
 
@@ -621,6 +688,7 @@ class OwnerOrderService:
                     quantity=kl.quantity,
                     item_name=ol.item_name,
                     variation_name=ol.variation_name,
+                    addon_names=[a.name for a in ol.addons],
                     notes=ol.notes,
                 ),
             )
@@ -718,7 +786,10 @@ class OwnerOrderService:
         self._assert_order_open(order)
         lines = await self._fetch_order_lines(order_id)
         active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
-        if not active_lines and (order.time_charge or Decimal("0")) <= 0:
+        time_part = Decimal("0")
+        if not order.time_billing_excluded:
+            time_part = order.time_charge or Decimal("0")
+        if not active_lines and time_part <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Order has no billable items")
         amounts = await self._bill_amounts(owner, order, lines, preview)
         bill = await self._get_open_bill(order.id)
@@ -732,6 +803,7 @@ class OwnerOrderService:
             )
             self.db.add(bill)
         self._apply_bill_amounts(bill, preview, amounts)
+        await self._assert_discount_preview(owner, bill.subtotal, preview)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
 
@@ -889,6 +961,12 @@ class OwnerOrderService:
             bill.status = BillStatus.SETTLED
             order.status = OrderStatus.SETTLED
             order.settled_at = datetime.now(timezone.utc)
+            preview = BillPreviewRequest(
+                discount_amount=disc_amt,
+                discount_percent=disc_pct,
+                tax_percent=bill.tax_percent,
+            )
+            await self._on_bill_settled(owner, outlet_id, order, bill, preview)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
 
@@ -924,6 +1002,7 @@ class OwnerOrderService:
         lines = await self._fetch_order_lines(bill.order_id)
         amounts = await self._bill_amounts(owner, order, lines, preview)
         self._apply_bill_amounts(bill, preview, amounts)
+        await self._assert_discount_preview(owner, bill.subtotal, preview)
         existing_paid = sum((p.amount for p in bill.payments), Decimal("0"))
         new_paid = sum((p.amount for p in payload.payments), Decimal("0"))
         total_paid = existing_paid + new_paid
@@ -932,14 +1011,12 @@ class OwnerOrderService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Payments ({total_paid}) must equal grand total ({bill.grand_total})",
             )
-        inv = OwnerInventoryService(self.db)
-        active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
         if not payload.payments and money(existing_paid) == money(bill.grand_total):
             bill.status = BillStatus.SETTLED
             order.status = OrderStatus.SETTLED
             order.settled_at = datetime.now(timezone.utc)
-            await inv.deduct_for_order_lines(outlet_id, active_lines)
             await self._ensure_table_label_snapshot(owner, outlet_id, order)
+            await self._on_bill_settled(owner, outlet_id, order, bill, preview)
             await self.db.commit()
             return await self.get_bill(owner, outlet_id, bill.id)
         for payment in payload.payments:
@@ -953,10 +1030,62 @@ class OwnerOrderService:
         bill.status = BillStatus.SETTLED
         order.status = OrderStatus.SETTLED
         order.settled_at = datetime.now(timezone.utc)
-        await inv.deduct_for_order_lines(outlet_id, active_lines)
         await self._ensure_table_label_snapshot(owner, outlet_id, order)
+        await self._on_bill_settled(owner, outlet_id, order, bill, preview)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
+
+    async def _assert_discount_preview(
+        self,
+        owner: BusinessOwner,
+        subtotal: Decimal,
+        preview: BillPreviewRequest,
+    ) -> None:
+        settings_svc = BusinessSettingsService(self.db)
+        pos = await settings_svc.get_pos_settings(owner.business_id)
+        await assert_discount_allowed(
+            settings_svc,
+            owner,
+            pos,
+            subtotal,
+            preview.discount_amount,
+            preview.discount_percent,
+            preview.manager_approval_pin,
+        )
+
+    async def _on_bill_settled(
+        self,
+        owner: BusinessOwner,
+        outlet_id: uuid.UUID,
+        order: PosOrder,
+        bill: PosBill,
+        preview: BillPreviewRequest,
+    ) -> None:
+        await InvoiceService(self.db).assign_invoice_on_settle(bill, owner.business_id)
+        if order.customer_id is None and order.customer_mobile:
+            # Older orders / direct edits: make sure every settled bill with a mobile lands in CRM.
+            from app.services.owner.customer_service import OwnerCustomerService
+
+            await OwnerCustomerService(self.db).sync_order_customer(order, owner)
+        if order.customer_id is not None:
+            from app.services.owner.customer_service import OwnerCustomerService
+
+            await self.db.flush()
+            await OwnerCustomerService(self.db).refresh_stats(order.customer_id)
+        await TenantAuditService(self.db).log(
+            business_id=owner.business_id,
+            outlet_id=outlet_id,
+            actor=owner,
+            action="bill.settle",
+            entity_type="bill",
+            entity_id=str(bill.id),
+            summary=f"Settled bill #{bill.bill_number} ₹{bill.grand_total}",
+            detail={
+                "order_number": order.order_number,
+                "invoice_code": bill.invoice_code,
+                "discount_percent": str(preview.discount_percent),
+            },
+        )
 
     async def _refresh_bill_amounts(
         self,
@@ -1017,6 +1146,9 @@ class OwnerOrderService:
             balance_due=money(bill.grand_total - paid),
             status=bill.status,
             payments=payments_out,
+            invoice_number=bill.invoice_number,
+            invoice_code=bill.invoice_code,
+            refunded_total=money(bill.refunded_total),
         )
 
     async def _get_menu_item(self, outlet_id: uuid.UUID, menu_item_id: uuid.UUID) -> MenuItem:
@@ -1051,18 +1183,33 @@ class OwnerOrderService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu item not found")
         if not item.is_available:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Item is out of stock")
+        available_variations = [v for v in item.variations if v.is_available]
         variation: MenuItemVariation | None = None
         if variation_id is not None:
             variation = next((v for v in item.variations if v.id == variation_id), None)
             if variation is None:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid variation")
+            if not variation.is_available:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This variation is not available",
+                )
         elif item.variations:
-            defaults = [v for v in item.variations if v.is_default]
-            variation = defaults[0] if defaults else item.variations[0]
+            if not available_variations:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No variations available for this item",
+                )
+            variation = pick_default_variation(item, available_variations)
+            assert variation is not None
         addons: list[MenuItemAddon] = []
         if addon_ids:
             addon_map = {a.id: a for a in item.addons if a.is_available}
+            seen_addon_ids: set[uuid.UUID] = set()
             for aid in addon_ids:
+                if aid in seen_addon_ids:
+                    continue
+                seen_addon_ids.add(aid)
                 addon = addon_map.get(aid)
                 if addon is None:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid add-on")
@@ -1269,6 +1416,7 @@ class OwnerOrderService:
             customer_mobile=order.customer_mobile,
             customer_locality=order.customer_locality,
             customer_relation=order.customer_relation,
+            customer_id=order.customer_id,
             bill_saved_at=order.bill_saved_at,
             pay_later=order.pay_later,
             notes=order.notes,
@@ -1279,6 +1427,7 @@ class OwnerOrderService:
             time_billed_minutes=order.time_billed_minutes,
             hourly_rate_snapshot=order.hourly_rate_snapshot,
             time_charge=order.time_charge,
+            time_billing_excluded=order.time_billing_excluded,
             lines=lines_out,
             running_subtotal=money(subtotal),
             warnings=[],

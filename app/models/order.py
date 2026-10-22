@@ -34,6 +34,7 @@ from app.models.enums import (
 from app.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.customer import Customer
     from app.models.tenant import BusinessOwner, Outlet
     from app.models.venue import VenueTable
 
@@ -107,6 +108,12 @@ class PosOrder(Base, TimestampMixin):
         Enum(CustomerRelation, name="customer_relation", native_enum=False),
         nullable=True,
     )
+    customer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("customers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     bill_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     pay_later: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -129,9 +136,11 @@ class PosOrder(Base, TimestampMixin):
     time_billed_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hourly_rate_snapshot: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     time_charge: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    time_billing_excluded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     outlet: Mapped["Outlet"] = relationship(back_populates="pos_orders")
     venue_table: Mapped[Optional["VenueTable"]] = relationship(back_populates="pos_orders")
+    customer: Mapped[Optional["Customer"]] = relationship(back_populates="orders")
     lines: Mapped[list["PosOrderLine"]] = relationship(
         back_populates="order",
         cascade="all, delete-orphan",
@@ -157,7 +166,7 @@ class PosOrderLine(Base, TimestampMixin):
     )
     menu_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("menu_items.id", ondelete="RESTRICT"),
+        ForeignKey("menu_items.id", ondelete="SET NULL"),
         nullable=True,
     )
     is_open_item: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -319,6 +328,9 @@ class PosBill(Base, TimestampMixin):
         nullable=False,
         default=BillStatus.OPEN,
     )
+    invoice_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    invoice_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    refunded_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
 
     order: Mapped["PosOrder"] = relationship(back_populates="bills")
     payments: Mapped[list["PosBillPayment"]] = relationship(

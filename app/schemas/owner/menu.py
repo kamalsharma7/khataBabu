@@ -33,7 +33,12 @@ class MenuVariationInput(BaseModel):
     price: Decimal = Field(ge=0)
     sort_order: int = 0
     is_default: bool = False
+    is_available: bool = True
     weight_grams: int | None = Field(default=None, ge=1, le=50000)
+    food_type: FoodType | None = Field(
+        default=None,
+        description="Null = same as menu item",
+    )
 
 
 class MenuAddonInput(BaseModel):
@@ -42,6 +47,10 @@ class MenuAddonInput(BaseModel):
     sort_order: int = 0
     is_available: bool = True
     weight_grams: int | None = Field(default=None, ge=1, le=50000)
+    food_type: FoodType | None = Field(
+        default=None,
+        description="Null = same as menu item; non-veg topping can mark line non-veg",
+    )
 
 
 class MenuVariationResponse(BaseModel):
@@ -50,7 +59,9 @@ class MenuVariationResponse(BaseModel):
     price: Decimal
     sort_order: int
     is_default: bool
+    is_available: bool = True
     weight_grams: int | None = None
+    food_type: FoodType | None = None
 
     model_config = {"from_attributes": True}
 
@@ -62,6 +73,7 @@ class MenuAddonResponse(BaseModel):
     sort_order: int
     is_available: bool
     weight_grams: int | None = None
+    food_type: FoodType | None = None
 
     model_config = {"from_attributes": True}
 
