@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.compliance import TenantAuditLog
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.settings import AuditLogEntryResponse, AuditLogListResponse
-from app.services.owner.permissions import PERM_AUDIT_VIEW, has_permission
+from app.services.owner.permissions import PERM_AUDIT_VIEW, assert_permission
 
 
 class ComplianceQueryService:
@@ -22,8 +22,7 @@ class ComplianceQueryService:
         outlet_id: uuid.UUID | None,
         limit: int = 100,
     ) -> AuditLogListResponse:
-        if not has_permission(owner.role, PERM_AUDIT_VIEW):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+        await assert_permission(self.db, owner, PERM_AUDIT_VIEW, outlet_id)
         q = (
             select(TenantAuditLog)
             .where(TenantAuditLog.business_id == owner.business_id)

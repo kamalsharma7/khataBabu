@@ -18,7 +18,7 @@ from app.services.owner.access import get_outlet_for_owner
 from app.services.owner.audit_service import TenantAuditService
 from app.services.owner.business_settings_service import BusinessSettingsService
 from app.services.owner.order_pricing import money
-from app.services.owner.permissions import PERM_POS_REFUND, has_permission
+from app.services.owner.permissions import PERM_POS_REFUND, assert_permission
 
 
 class RefundService:
@@ -34,9 +34,7 @@ class RefundService:
         bill_id: uuid.UUID,
         payload: RefundCreateRequest,
     ) -> RefundResponse:
-        if not has_permission(owner.role, PERM_POS_REFUND):
-            if owner.role in (OwnerRole.WORKER, OwnerRole.EMPLOYEE):
-                raise HTTPException(status_code=403, detail="Refunds require manager access")
+        await assert_permission(self.db, owner, PERM_POS_REFUND, outlet_id)
         await get_outlet_for_owner(self.db, owner, outlet_id)
         result = await self.db.execute(
             select(PosBill)

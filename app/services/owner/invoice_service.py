@@ -67,7 +67,7 @@ class InvoiceService:
         pos = await self._pos_settings(owner.business_id)
         name = pos.trading_name or business.legal_name if business else "Outlet"
         addr = pos.registered_address or ""
-        gstin = business.gstin if business and business.gst_registered else ""
+        gstin = (business.gstin or "") if business else ""
         fssai = business.fssai if business else ""
         inv = bill.invoice_code or f"BILL-{bill.bill_number}"
         rows = ""
@@ -111,8 +111,11 @@ th, td {{ border-bottom: 1px solid #ddd; padding: 0.35rem 0.25rem; text-align: l
 <dl class="totals">
   <dt>Subtotal</dt><dd>₹{money(bill.subtotal)}</dd>
   <dt>Discount</dt><dd>−₹{money(bill.discount_amount)}</dd>
-  <dt>CGST</dt><dd>₹{money(bill.cgst_amount)}</dd>
-  <dt>SGST</dt><dd>₹{money(bill.sgst_amount)}</dd>
+  {f"<dt>{html.escape(bill.tax_label)}</dt><dd></dd>" if getattr(bill, "tax_label", None) else ""}
+  {f"<dt>CGST</dt><dd>₹{money(bill.cgst_amount)}</dd>" if money(bill.cgst_amount) > 0 else ""}
+  {f"<dt>SGST</dt><dd>₹{money(bill.sgst_amount)}</dd>" if money(bill.sgst_amount) > 0 else ""}
+  {f"<dt>IGST</dt><dd>₹{money(getattr(bill, 'igst_amount', 0))}</dd>" if money(getattr(bill, "igst_amount", 0)) > 0 else ""}
+  {f"<dt>Tax</dt><dd>₹{money(bill.tax_amount)}</dd>" if money(bill.tax_amount) > 0 and money(bill.cgst_amount) <= 0 and money(bill.sgst_amount) <= 0 and money(getattr(bill, "igst_amount", 0)) <= 0 else ""}
   <dt><strong>Grand total</strong></dt><dd><strong>₹{money(bill.grand_total)}</strong></dd>
   {f"<dt>Refunded</dt><dd>−₹{money(bill.refunded_total)}</dd>" if bill.refunded_total > 0 else ""}
 </dl>

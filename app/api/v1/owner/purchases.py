@@ -16,13 +16,13 @@ from app.schemas.owner.purchase import (
     PurchaseListResponse,
     PurchasePaymentCreate,
 )
-from app.services.owner.permissions import PERM_POS_INVENTORY
+from app.services.owner.permissions import PERM_PURCHASES
 from app.services.owner.purchase_service import OwnerPurchaseService
 
 router = APIRouter(
     prefix="/outlets/{outlet_id}/purchases",
     tags=["owner-purchases"],
-    dependencies=[Depends(require_permission(PERM_POS_INVENTORY))],
+    dependencies=[Depends(require_permission(PERM_PURCHASES))],
 )
 
 

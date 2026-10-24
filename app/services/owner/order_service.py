@@ -68,16 +68,15 @@ from app.services.owner.inventory_service import OwnerInventoryService
 from app.services.owner.menu_food_type import effective_food_type, pick_default_variation
 from app.services.owner.order_pricing import (
     compute_bill_totals,
-    compute_item_gst_breakdown,
     compute_time_charge,
-    default_tax_percent_for_business,
     line_total,
     money,
     order_effective_subtotal,
     order_subtotal,
-    resolve_tax_percent,
     subtotal_from_lines,
 )
+from app.services.owner.tax_engine import compute_for_bill, guest_pays
+from app.services.owner.tax_service import OwnerTaxService
 
 
 def historical_table_label(order: PosOrder, table: VenueTable | None) -> str | None:
@@ -87,6 +86,45 @@ def historical_table_label(order: PosOrder, table: VenueTable | None) -> str | N
     if table is not None:
         return table.label
     return None
+
+
+def _sellable_variations(variations: list[MenuItemVariation]) -> list[MenuItemVariation]:
+    """Parents with children are types — only the size (leaf) can go on a bill line."""
+    parent_ids = {v.parent_id for v in variations if v.parent_id}
+    return [v for v in variations if v.id not in parent_ids]
+
+
+def _variation_label(variation: MenuItemVariation, all_vars: list[MenuItemVariation]) -> str:
+    if variation.parent_id:
+        parent = next((v for v in all_vars if v.id == variation.parent_id), None)
+        if parent:
+            return f"{parent.name} · {variation.name}"
+    return variation.name
+
+
+def _assert_addon_groups(item: MenuItem, addons: list[MenuItemAddon]) -> None:
+    groups = list(getattr(item, "addon_groups", None) or [])
+    if not groups:
+        return
+    selected_by_group: dict[uuid.UUID, int] = {}
+    for addon in addons:
+        gid = getattr(addon, "group_id", None)
+        if gid:
+            selected_by_group[gid] = selected_by_group.get(gid, 0) + 1
+    for group in groups:
+        count = selected_by_group.get(group.id, 0)
+        min_select = int(group.min_select or 0)
+        max_select = group.max_select
+        if count < min_select:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Pick at least {min_select} from {group.name}",
+            )
+        if max_select is not None and count > max_select:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Pick at most {max_select} from {group.name}",
+            )
 
 
 class OwnerOrderService:
@@ -100,21 +138,26 @@ class OwnerOrderService:
     ) -> PosBillingSettingsResponse:
         await get_outlet_for_owner(self.db, owner, outlet_id)
         biz = owner.business
-        default_tax = default_tax_percent_for_business(biz.gst_registered, biz.gstin)
+        catalog = await OwnerTaxService(self.db).catalog(owner, outlet_id)
         return PosBillingSettingsResponse(
             gst_registered=biz.gst_registered,
             gstin=biz.gstin,
-            default_tax_percent=default_tax,
+            default_tax_percent=catalog.default_tax_percent,
+            tax_enabled=catalog.tax_enabled,
+            default_method=catalog.default_method,
+            tax_label=catalog.tax_label,
+            apply_tax=catalog.tax_enabled,
         )
 
     def _normalize_bill_preview(self, owner: BusinessOwner, payload: BillPreviewRequest) -> BillPreviewRequest:
-        biz = owner.business
-        tax = resolve_tax_percent(biz.gst_registered, biz.gstin, payload.tax_percent)
         return BillPreviewRequest(
             discount_amount=payload.discount_amount,
             discount_percent=payload.discount_percent,
-            tax_percent=tax,
+            tax_percent=payload.tax_percent,
+            apply_tax=payload.apply_tax,
+            tip_amount=payload.tip_amount,
             round_to_rupee=payload.round_to_rupee,
+            manager_approval_pin=payload.manager_approval_pin,
         )
 
     @staticmethod
@@ -331,16 +374,22 @@ class OwnerOrderService:
         if payload.order_type is not None:
             order.order_type = payload.order_type
         if payload.pay_later is not None:
+            if payload.pay_later and not order.pay_later:
+                from app.services.owner.permissions import PERM_POS_PAY_LATER, assert_permission
+
+                await assert_permission(self.db, owner, PERM_POS_PAY_LATER, outlet_id)
             order.pay_later = payload.pay_later
         if payload.notes is not None:
             order.notes = payload.notes
         if payload.time_billing_excluded is not None:
-            from app.services.owner.permissions import PERM_SETTINGS_ALL, has_permission
+            from app.services.owner.permissions import PERM_DENIED_MESSAGE, PERM_SETTINGS_ALL, assert_permission
 
-            if not has_permission(owner.role, PERM_SETTINGS_ALL):
+            try:
+                await assert_permission(self.db, owner, PERM_SETTINGS_ALL, outlet_id)
+            except HTTPException:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Only the business owner can waive table time billing",
+                    detail=PERM_DENIED_MESSAGE,
                 )
             order.time_billing_excluded = payload.time_billing_excluded
             if payload.time_billing_excluded:
@@ -462,7 +511,7 @@ class OwnerOrderService:
             menu_item_id=item.id,
             menu_item_variation_id=variation.id if variation else None,
             item_name=item.name,
-            variation_name=variation.name if variation else None,
+            variation_name=_variation_label(variation, item.variations) if variation else None,
             quantity=payload.quantity,
             unit_price=unit_price,
             addons_total=addons_total,
@@ -709,59 +758,71 @@ class OwnerOrderService:
         order: PosOrder,
         lines: list[PosOrderLine],
         preview: BillPreviewRequest,
-    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
+    ) -> tuple:
         subtotal = order_effective_subtotal(order, lines)
-        active_lines = [line for line in lines if line.status != OrderLineStatus.CANCELLED]
-        menu_ids = [line.menu_item_id for line in active_lines if line.menu_item_id]
-        menu_by_id: dict[uuid.UUID, MenuItem] = {}
-        if menu_ids:
-            menu_result = await self.db.execute(
-                select(MenuItem).where(MenuItem.id.in_(menu_ids)),
-            )
-            menu_by_id = {row.id: row for row in menu_result.scalars().all()}
-        line_gst_rows: list[tuple[Decimal, Decimal, Decimal]] = []
-        for line in active_lines:
-            cgst_pct = Decimal("0")
-            sgst_pct = Decimal("0")
-            if line.menu_item_id and line.menu_item_id in menu_by_id:
-                menu_row = menu_by_id[line.menu_item_id]
-                if menu_row.gst_applicable:
-                    cgst_pct = menu_row.cgst_percent
-                    sgst_pct = menu_row.sgst_percent
-            line_gst_rows.append((line.line_total, cgst_pct, sgst_pct))
-        cgst_amt: Decimal | None = None
-        sgst_amt: Decimal | None = None
-        if owner.business.gst_registered and any(r[1] or r[2] for r in line_gst_rows):
-            cgst_amt, sgst_amt, _ = compute_item_gst_breakdown(
-                line_gst_rows,
-                preview.discount_amount,
-                preview.discount_percent,
-                subtotal,
-            )
-        discount, tax_amount, round_off, grand_total, _taxable, cgst, sgst = compute_bill_totals(
+        discount, _tax_amount, _round_off, _grand, taxable, _c, _s = compute_bill_totals(
             subtotal,
             preview.discount_amount,
             preview.discount_percent,
-            preview.tax_percent,
-            preview.round_to_rupee,
-            cgst_amount=cgst_amt,
-            sgst_amount=sgst_amt,
-            tip_amount=preview.tip_amount,
+            Decimal("0"),
+            False,
+            tip_amount=Decimal("0"),
         )
+        profiles = await OwnerTaxService(self.db).matching_profiles(order.outlet_id, order.order_type)
+        ratio = (taxable / subtotal) if subtotal > 0 else Decimal("0")
+        line_taxables: list[tuple] = []
+        items_total = Decimal("0")
+        for line in lines:
+            if line.status == OrderLineStatus.CANCELLED:
+                continue
+            share = money(line.line_total * ratio)
+            line_taxables.append((line.menu_item_id, share))
+            items_total += line.line_total
+        time_part = money(subtotal - items_total)
+        if time_part > 0:
+            line_taxables.append((None, money(time_part * ratio)))
+        tax = compute_for_bill(taxable, line_taxables, profiles, apply_tax=preview.apply_tax)
+        tip = money(preview.tip_amount)
+        grand = guest_pays(taxable, tax, tip)
+        round_off = Decimal("0")
+        if preview.round_to_rupee:
+            rounded = money(Decimal(grand.to_integral_value()))
+            round_off = money(rounded - grand)
+            grand = rounded
         return (
             subtotal,
             discount,
             preview.discount_percent,
-            preview.tax_percent,
-            tax_amount,
-            cgst,
-            sgst,
+            tax.tax_percent,
+            tax.tax_amount,
+            tax.cgst_amount,
+            tax.sgst_amount,
+            tax.igst_amount,
             round_off,
-            grand_total,
+            grand,
+            tax.method if tax.applied else None,
+            tax.label if tax.applied else None,
         )
 
     def _apply_bill_amounts(self, bill: PosBill, preview: BillPreviewRequest, amounts: tuple) -> None:
-        subtotal, discount, disc_pct, tax_pct, tax_amount, cgst, sgst, round_off, grand_total = amounts
+        if len(amounts) >= 12:
+            (
+                subtotal,
+                discount,
+                disc_pct,
+                tax_pct,
+                tax_amount,
+                cgst,
+                sgst,
+                igst,
+                round_off,
+                grand_total,
+                method,
+                label,
+            ) = amounts[:12]
+        else:
+            subtotal, discount, disc_pct, tax_pct, tax_amount, cgst, sgst, round_off, grand_total = amounts
+            igst, method, label = Decimal("0"), None, None
         bill.subtotal = subtotal
         bill.discount_amount = discount
         bill.discount_percent = disc_pct
@@ -769,6 +830,9 @@ class OwnerOrderService:
         bill.tax_amount = tax_amount
         bill.cgst_amount = cgst
         bill.sgst_amount = sgst
+        bill.igst_amount = igst
+        bill.tax_method = method
+        bill.tax_label = label
         bill.tip_amount = preview.tip_amount
         bill.round_off = round_off
         bill.grand_total = grand_total
@@ -803,7 +867,7 @@ class OwnerOrderService:
             )
             self.db.add(bill)
         self._apply_bill_amounts(bill, preview, amounts)
-        await self._assert_discount_preview(owner, bill.subtotal, preview)
+        await self._assert_discount_preview(owner, outlet_id, bill.subtotal, preview)
         await self.db.commit()
         return await self.get_bill(owner, outlet_id, bill.id)
 
@@ -1002,7 +1066,7 @@ class OwnerOrderService:
         lines = await self._fetch_order_lines(bill.order_id)
         amounts = await self._bill_amounts(owner, order, lines, preview)
         self._apply_bill_amounts(bill, preview, amounts)
-        await self._assert_discount_preview(owner, bill.subtotal, preview)
+        await self._assert_discount_preview(owner, outlet_id, bill.subtotal, preview)
         existing_paid = sum((p.amount for p in bill.payments), Decimal("0"))
         new_paid = sum((p.amount for p in payload.payments), Decimal("0"))
         total_paid = existing_paid + new_paid
@@ -1038,9 +1102,14 @@ class OwnerOrderService:
     async def _assert_discount_preview(
         self,
         owner: BusinessOwner,
+        outlet_id: uuid.UUID,
         subtotal: Decimal,
         preview: BillPreviewRequest,
     ) -> None:
+        if preview.discount_amount > 0 or preview.discount_percent > 0:
+            from app.services.owner.permissions import PERM_POS_DISCOUNT, assert_permission
+
+            await assert_permission(self.db, owner, PERM_POS_DISCOUNT, outlet_id)
         settings_svc = BusinessSettingsService(self.db)
         pos = await settings_svc.get_pos_settings(owner.business_id)
         await assert_discount_allowed(
@@ -1097,24 +1166,16 @@ class OwnerOrderService:
     ) -> None:
         order = await self._load_order_head_by_id(order_id)
         lines = await self._fetch_order_lines(order_id)
-        subtotal = order_effective_subtotal(order, lines)
-        discount, tax_amount, round_off, grand_total, _taxable, cgst, sgst = compute_bill_totals(
-            subtotal,
-            discount_amount,
-            discount_percent,
-            tax_percent,
-            True,
+        apply_tax = bill.tax_method is not None or money(bill.tax_amount) > 0 or money(tax_percent) > 0
+        preview = BillPreviewRequest(
+            discount_amount=discount_amount,
+            discount_percent=discount_percent,
+            apply_tax=apply_tax,
             tip_amount=bill.tip_amount or Decimal("0"),
+            round_to_rupee=True,
         )
-        bill.subtotal = subtotal
-        bill.discount_amount = discount
-        bill.discount_percent = discount_percent
-        bill.tax_percent = tax_percent
-        bill.tax_amount = tax_amount
-        bill.cgst_amount = cgst
-        bill.sgst_amount = sgst
-        bill.round_off = round_off
-        bill.grand_total = grand_total
+        amounts = await self._bill_amounts(None, order, lines, preview)  # type: ignore[arg-type]
+        self._apply_bill_amounts(bill, preview, amounts)
 
     def _bill_response(self, bill: PosBill) -> BillResponse:
         paid = money(sum((p.amount for p in bill.payments), Decimal("0")))
@@ -1139,6 +1200,9 @@ class OwnerOrderService:
             tax_amount=bill.tax_amount,
             cgst_amount=bill.cgst_amount,
             sgst_amount=bill.sgst_amount,
+            igst_amount=bill.igst_amount,
+            tax_method=bill.tax_method,
+            tax_label=bill.tax_label,
             tip_amount=bill.tip_amount,
             round_off=bill.round_off,
             grand_total=bill.grand_total,
@@ -1176,6 +1240,7 @@ class OwnerOrderService:
             .options(
                 selectinload(MenuItem.variations),
                 selectinload(MenuItem.addons),
+                selectinload(MenuItem.addon_groups),
             ),
         )
         item = result.scalar_one_or_none()
@@ -1183,18 +1248,23 @@ class OwnerOrderService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu item not found")
         if not item.is_available:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Item is out of stock")
-        available_variations = [v for v in item.variations if v.is_available]
+        sellable = _sellable_variations(item.variations)
+        available_variations = [v for v in sellable if v.is_available]
         variation: MenuItemVariation | None = None
         if variation_id is not None:
             variation = next((v for v in item.variations if v.id == variation_id), None)
-            if variation is None:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid variation")
+            sellable_ids = {v.id for v in sellable}
+            if variation is None or variation.id not in sellable_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Pick a size under the type — not the type itself",
+                )
             if not variation.is_available:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="This variation is not available",
                 )
-        elif item.variations:
+        elif sellable:
             if not available_variations:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1214,6 +1284,7 @@ class OwnerOrderService:
                 if addon is None:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid add-on")
                 addons.append(addon)
+        _assert_addon_groups(item, addons)
         return item, variation, addons
 
     async def _open_order_for_table(

@@ -11,6 +11,8 @@ from app.api.v1.owner import (
     pos,
     purchases,
     settings,
+    staff_permissions,
+    tax,
     venue,
 )
 
@@ -26,4 +28,6 @@ owner_router.include_router(pos.router)
 owner_router.include_router(inventory.router)
 owner_router.include_router(purchases.router)
 owner_router.include_router(customers.router)
+owner_router.include_router(staff_permissions.router)
+owner_router.include_router(tax.router)
 owner_router.include_router(analytics.router)

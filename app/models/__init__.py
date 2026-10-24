@@ -7,7 +7,7 @@ from app.models.compliance import (
 )
 from app.models.customer import Customer
 from app.models.inventory import InventoryItem, InventoryTransaction, MenuItemInventoryLink
-from app.models.menu import MenuCategory, MenuItem, MenuItemAddon, MenuItemVariation
+from app.models.menu import MenuAddonGroup, MenuCategory, MenuItem, MenuItemAddon, MenuItemVariation
 from app.models.order import (
     OutletCounter,
     PosBill,
@@ -23,6 +23,8 @@ from app.models.platform_admin import PlatformAdmin, PlatformAuditLog, PlatformL
 from app.models.platform_collection import PlatformCollection
 from app.models.platform_sales import PlatformSalesEmployee
 from app.models.purchase import PurchaseInvoice, PurchaseInvoiceLine, PurchasePayment
+from app.models.staff_permission import StaffPermissionGrant
+from app.models.tax import OutletTaxProfile, OutletTaxProfileItem
 from app.models.tenant import Business, BusinessOwner, Outlet
 from app.models.venue import VenueArea, VenueTable
 
@@ -42,6 +44,7 @@ __all__ = [
     "MenuItem",
     "MenuItemAddon",
     "MenuItemVariation",
+    "MenuAddonGroup",
     "MenuItemInventoryLink",
     "InventoryItem",
     "InventoryTransaction",
@@ -62,4 +65,7 @@ __all__ = [
     "PurchaseInvoiceLine",
     "PurchasePayment",
     "Customer",
+    "StaffPermissionGrant",
+    "OutletTaxProfile",
+    "OutletTaxProfileItem",
 ]

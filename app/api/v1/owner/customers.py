@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.owner import get_current_owner
-from app.api.deps.permissions import require_permission
+from app.api.deps.permissions import require_any_permission, require_permission
 from app.db.deps import get_db
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.customer import (
@@ -21,17 +21,24 @@ from app.schemas.owner.customer import (
     CustomerUpdate,
 )
 from app.services.owner.customer_service import OwnerCustomerService
-from app.services.owner.permissions import PERM_ANALYTICS, PERM_POS_BILLING
+from app.services.owner.permissions import (
+    PERM_ANALYTICS,
+    PERM_CRM_DELETE,
+    PERM_CRM_EDIT,
+    PERM_CRM_VIEW,
+    PERM_POS_BILLING,
+)
 
 router = APIRouter(prefix="/outlets/{outlet_id}/customers", tags=["owner-customers"])
 
-# Billing staff need lookup / search / create / update while taking orders;
-# the full database, insights and deletes are for owners/admins (analytics permission).
-billing = Depends(require_permission(PERM_POS_BILLING))
-crm = Depends(require_permission(PERM_ANALYTICS))
+# Counter staff can look up / save a guest while billing; the CRM pages use crm.* ticks.
+crm_lookup = Depends(require_any_permission(PERM_CRM_VIEW, PERM_POS_BILLING))
+crm_write = Depends(require_any_permission(PERM_CRM_EDIT, PERM_POS_BILLING))
+crm_read = Depends(require_any_permission(PERM_CRM_VIEW, PERM_ANALYTICS))
+crm_delete = Depends(require_permission(PERM_CRM_DELETE))
 
 
-@router.get("/lookup", response_model=CustomerLookupResponse, dependencies=[billing])
+@router.get("/lookup", response_model=CustomerLookupResponse, dependencies=[crm_lookup])
 async def lookup_customer(
     outlet_id: uuid.UUID,
     phone: str = Query(min_length=4, max_length=20),
@@ -41,7 +48,7 @@ async def lookup_customer(
     return await OwnerCustomerService(db).lookup(owner, outlet_id, phone)
 
 
-@router.get("/search", response_model=list[CustomerSummary], dependencies=[billing])
+@router.get("/search", response_model=list[CustomerSummary], dependencies=[crm_lookup])
 async def search_customers(
     outlet_id: uuid.UUID,
     q: str = Query(min_length=1, max_length=64),
@@ -51,7 +58,7 @@ async def search_customers(
     return await OwnerCustomerService(db).search(owner, outlet_id, q)
 
 
-@router.get("/insights", response_model=CrmInsightsResponse, dependencies=[crm])
+@router.get("/insights", response_model=CrmInsightsResponse, dependencies=[crm_read])
 async def crm_insights(
     outlet_id: uuid.UUID,
     owner: BusinessOwner = Depends(get_current_owner),
@@ -60,7 +67,7 @@ async def crm_insights(
     return await OwnerCustomerService(db).insights(owner, outlet_id)
 
 
-@router.post("/backfill", response_model=CustomerBackfillResponse, dependencies=[crm])
+@router.post("/backfill", response_model=CustomerBackfillResponse, dependencies=[crm_write])
 async def backfill_customers(
     outlet_id: uuid.UUID,
     owner: BusinessOwner = Depends(get_current_owner),
@@ -69,7 +76,7 @@ async def backfill_customers(
     return await OwnerCustomerService(db).backfill(owner, outlet_id)
 
 
-@router.get("", response_model=CustomerListResponse, dependencies=[crm])
+@router.get("", response_model=CustomerListResponse, dependencies=[crm_read])
 async def list_customers(
     outlet_id: uuid.UUID,
     q: Optional[str] = Query(default=None, max_length=64),
@@ -84,7 +91,7 @@ async def list_customers(
     return await OwnerCustomerService(db).list_customers(owner, outlet_id, q, segment, sort, tag, limit, offset)
 
 
-@router.post("", response_model=CustomerDetail, status_code=status.HTTP_201_CREATED, dependencies=[billing])
+@router.post("", response_model=CustomerDetail, status_code=status.HTTP_201_CREATED, dependencies=[crm_write])
 async def create_customer(
     outlet_id: uuid.UUID,
     body: CustomerCreate,
@@ -94,7 +101,7 @@ async def create_customer(
     return await OwnerCustomerService(db).create_customer(owner, outlet_id, body)
 
 
-@router.get("/{customer_id}", response_model=CustomerDetail, dependencies=[billing])
+@router.get("/{customer_id}", response_model=CustomerDetail, dependencies=[crm_lookup])
 async def get_customer(
     outlet_id: uuid.UUID,
     customer_id: uuid.UUID,
@@ -104,7 +111,7 @@ async def get_customer(
     return await OwnerCustomerService(db).get_customer(owner, outlet_id, customer_id)
 
 
-@router.patch("/{customer_id}", response_model=CustomerDetail, dependencies=[billing])
+@router.patch("/{customer_id}", response_model=CustomerDetail, dependencies=[crm_write])
 async def update_customer(
     outlet_id: uuid.UUID,
     customer_id: uuid.UUID,
@@ -115,7 +122,7 @@ async def update_customer(
     return await OwnerCustomerService(db).update_customer(owner, outlet_id, customer_id, body)
 
 
-@router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[crm])
+@router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[crm_delete])
 async def delete_customer(
     outlet_id: uuid.UUID,
     customer_id: uuid.UUID,

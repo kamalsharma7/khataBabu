@@ -95,6 +95,7 @@ class BillPreviewRequest(BaseModel):
     discount_amount: Decimal = Field(default=Decimal("0"), ge=0)
     discount_percent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     tax_percent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    apply_tax: bool = True
     tip_amount: Decimal = Field(default=Decimal("0"), ge=0)
     round_to_rupee: bool = True
     manager_approval_pin: Optional[str] = Field(default=None, max_length=12)
@@ -138,6 +139,10 @@ class PosBillingSettingsResponse(BaseModel):
     gst_registered: bool
     gstin: Optional[str] = None
     default_tax_percent: Decimal = Decimal("0")
+    tax_enabled: bool = False
+    default_method: str = "forward"
+    tax_label: Optional[str] = None
+    apply_tax: bool = False
 
 
 class OrderLineAddonResponse(BaseModel):
@@ -211,6 +216,9 @@ class BillResponse(BaseModel):
     tax_amount: Decimal
     cgst_amount: Decimal = Decimal("0")
     sgst_amount: Decimal = Decimal("0")
+    igst_amount: Decimal = Decimal("0")
+    tax_method: Optional[str] = None
+    tax_label: Optional[str] = None
     tip_amount: Decimal = Decimal("0")
     round_off: Decimal
     grand_total: Decimal

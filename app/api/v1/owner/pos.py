@@ -6,10 +6,15 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps.owner import get_current_owner
+from app.api.deps.permissions import require_any_permission, require_permission
 from app.db.deps import get_db
 from app.models.enums import BillStatus, OrderStatus
 from app.models.tenant import BusinessOwner
+from app.services.owner.permissions import PERM_POS_BILLING, PERM_POS_BILLS, PERM_POS_CANCEL
+
+_billing = Depends(require_permission(PERM_POS_BILLING))
+_bills = Depends(require_any_permission(PERM_POS_BILLS, PERM_POS_BILLING))
+_cancel = Depends(require_permission(PERM_POS_CANCEL))
 from app.schemas.owner.order import (
     AddBillPaymentRequest,
     BillDetailResponse,
@@ -41,7 +46,7 @@ router = APIRouter(prefix="/outlets/{outlet_id}/pos", tags=["owner-pos"])
 @router.get("/billing-settings", response_model=PosBillingSettingsResponse)
 async def pos_billing_settings(
     outlet_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> PosBillingSettingsResponse:
     service = OwnerOrderService(db)
@@ -53,7 +58,7 @@ async def list_bills(
     outlet_id: uuid.UUID,
     bill_status: Optional[BillStatus] = Query(default=BillStatus.SETTLED),
     limit: int = Query(default=200, ge=1, le=500),
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _bills,
     db: AsyncSession = Depends(get_db),
 ) -> list[BillListEntryResponse]:
     service = OwnerOrderService(db)
@@ -64,7 +69,7 @@ async def list_bills(
 async def get_bill_detail(
     outlet_id: uuid.UUID,
     bill_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _bills,
     db: AsyncSession = Depends(get_db),
 ) -> BillDetailResponse:
     service = OwnerOrderService(db)
@@ -74,7 +79,7 @@ async def get_bill_detail(
 @router.get("/floor", response_model=FloorStatusResponse)
 async def pos_floor(
     outlet_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> FloorStatusResponse:
     service = OwnerOrderService(db)
@@ -85,7 +90,7 @@ async def pos_floor(
 async def list_orders(
     outlet_id: uuid.UUID,
     order_status: Optional[OrderStatus] = Query(default=OrderStatus.OPEN),
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> list[OrderResponse]:
     service = OwnerOrderService(db)
@@ -96,7 +101,7 @@ async def list_orders(
 async def create_order(
     outlet_id: uuid.UUID,
     body: OrderCreate,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -107,7 +112,7 @@ async def create_order(
 async def get_order(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -119,7 +124,7 @@ async def update_order(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: OrderUpdate,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -131,7 +136,7 @@ async def cancel_order(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: OrderCancel,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _cancel,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -143,7 +148,7 @@ async def transfer_table(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: OrderTransferTable,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -155,7 +160,7 @@ async def add_order_line(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: OrderLineCreate,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -167,7 +172,7 @@ async def add_open_order_line(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: OpenOrderLineCreate,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -180,7 +185,7 @@ async def update_order_line(
     order_id: uuid.UUID,
     line_id: uuid.UUID,
     body: OrderLineUpdate,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -192,7 +197,7 @@ async def remove_order_line(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     line_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -204,7 +209,7 @@ async def cancel_order_line(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     line_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _cancel,
     db: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     service = OwnerOrderService(db)
@@ -216,7 +221,7 @@ async def send_kot(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: SendKotRequest,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> KotResponse:
     service = OwnerOrderService(db)
@@ -227,7 +232,7 @@ async def send_kot(
 async def list_order_kots(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> list[KotResponse]:
     service = OwnerOrderService(db)
@@ -238,7 +243,7 @@ async def list_order_kots(
 async def get_kot(
     outlet_id: uuid.UUID,
     kot_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> KotResponse:
     service = OwnerOrderService(db)
@@ -250,7 +255,7 @@ async def save_order_bill(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: SaveOrderBillRequest,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> BillResponse:
     service = OwnerOrderService(db)
@@ -262,7 +267,7 @@ async def create_bill(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: BillPreviewRequest,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> BillResponse:
     service = OwnerOrderService(db)
@@ -273,7 +278,7 @@ async def create_bill(
 async def get_order_bill(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> BillResponse:
     service = OwnerOrderService(db)
@@ -285,7 +290,7 @@ async def add_bill_payment(
     outlet_id: uuid.UUID,
     bill_id: uuid.UUID,
     body: AddBillPaymentRequest,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> BillResponse:
     service = OwnerOrderService(db)
@@ -297,7 +302,7 @@ async def split_bill_preview(
     outlet_id: uuid.UUID,
     order_id: uuid.UUID,
     body: SplitBillPreviewBody,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> SplitBillPreviewResponse:
     service = OwnerOrderService(db)
@@ -309,7 +314,7 @@ async def settle_bill(
     outlet_id: uuid.UUID,
     bill_id: uuid.UUID,
     body: SettleBillRequest,
-    owner: BusinessOwner = Depends(get_current_owner),
+    owner: BusinessOwner = _billing,
     db: AsyncSession = Depends(get_db),
 ) -> BillResponse:
     service = OwnerOrderService(db)

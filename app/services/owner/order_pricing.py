@@ -111,13 +111,11 @@ def line_total(unit_price: Decimal, addons_total: Decimal, quantity: int) -> Dec
     return money((unit_price + addons_total) * quantity)
 
 
-# India restaurant GST (food service) default when business is GST-registered.
-DEFAULT_GST_TAX_PERCENT = Decimal("5")
+# Kept for older callers. GSTIN is invoice identity only — it never turns tax on.
+DEFAULT_GST_TAX_PERCENT = Decimal("0")
 
 
 def default_tax_percent_for_business(gst_registered: bool, gstin: str | None) -> Decimal:
-    if gst_registered and gstin and gstin.strip():
-        return DEFAULT_GST_TAX_PERCENT
     return Decimal("0")
 
 
@@ -126,6 +124,4 @@ def resolve_tax_percent(
     gstin: str | None,
     requested: Decimal,
 ) -> Decimal:
-    if requested > 0:
-        return money(requested)
-    return default_tax_percent_for_business(gst_registered, gstin)
+    return Decimal("0")

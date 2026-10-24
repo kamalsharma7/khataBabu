@@ -19,7 +19,7 @@ from app.schemas.owner.menu import (
     MenuItemResponse,
     MenuItemUpdate,
 )
-from app.services.owner.menu_service import OwnerMenuService
+from app.services.owner.menu_service import OwnerMenuService, item_to_response
 
 router = APIRouter(
     prefix="/outlets/{outlet_id}/menu",
@@ -82,7 +82,7 @@ async def list_items(
 ) -> list[MenuItemResponse]:
     service = OwnerMenuService(db)
     rows = await service.list_items(owner, outlet_id)
-    return [MenuItemResponse.model_validate(r) for r in rows]
+    return [item_to_response(r) for r in rows]
 
 
 @router.post("/items", response_model=MenuItemResponse, status_code=status.HTTP_201_CREATED)
@@ -94,7 +94,7 @@ async def create_item(
 ) -> MenuItemResponse:
     service = OwnerMenuService(db)
     row = await service.create_item(owner, outlet_id, body)
-    return MenuItemResponse.model_validate(row)
+    return item_to_response(row)
 
 
 @router.patch("/items/{item_id}", response_model=MenuItemResponse)
@@ -107,7 +107,7 @@ async def update_item(
 ) -> MenuItemResponse:
     service = OwnerMenuService(db)
     row = await service.update_item(owner, outlet_id, item_id, body)
-    return MenuItemResponse.model_validate(row)
+    return item_to_response(row)
 
 
 @router.put("/items/{item_id}/modifiers", response_model=MenuItemResponse)
@@ -120,7 +120,7 @@ async def replace_item_modifiers(
 ) -> MenuItemResponse:
     service = OwnerMenuService(db)
     row = await service.replace_item_modifiers(owner, outlet_id, item_id, body)
-    return MenuItemResponse.model_validate(row)
+    return item_to_response(row)
 
 
 @router.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

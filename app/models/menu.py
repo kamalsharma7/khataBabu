@@ -96,6 +96,11 @@ class MenuItem(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="MenuItemAddon.sort_order",
     )
+    addon_groups: Mapped[list["MenuAddonGroup"]] = relationship(
+        back_populates="menu_item",
+        cascade="all, delete-orphan",
+        order_by="MenuAddonGroup.sort_order",
+    )
     inventory_links: Mapped[list["MenuItemInventoryLink"]] = relationship(
         "MenuItemInventoryLink",
         back_populates="menu_item",
@@ -134,8 +139,47 @@ class MenuItemVariation(Base, TimestampMixin):
         ),
         nullable=True,
     )
+    parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("menu_item_variations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="variations")
+    parent: Mapped[Optional["MenuItemVariation"]] = relationship(
+        remote_side="MenuItemVariation.id",
+        back_populates="children",
+    )
+    children: Mapped[list["MenuItemVariation"]] = relationship(
+        back_populates="parent",
+        cascade="all, delete-orphan",
+    )
+
+
+class MenuAddonGroup(Base, TimestampMixin):
+    """Sauces / extras — min/max how many the cashier must pick."""
+
+    __tablename__ = "menu_addon_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    menu_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("menu_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    min_select: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_select: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    menu_item: Mapped["MenuItem"] = relationship(back_populates="addon_groups")
+    addons: Mapped[list["MenuItemAddon"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        order_by="MenuItemAddon.sort_order",
+    )
 
 
 class MenuItemAddon(Base, TimestampMixin):
@@ -168,5 +212,11 @@ class MenuItemAddon(Base, TimestampMixin):
         ),
         nullable=True,
     )
+    group_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("menu_addon_groups.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     menu_item: Mapped["MenuItem"] = relationship(back_populates="addons")
+    group: Mapped[Optional["MenuAddonGroup"]] = relationship(back_populates="addons")

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.compliance import OutletBusinessDay, OutletCashMovement
-from app.models.enums import BillStatus, OwnerRole, PaymentMethod
+from app.models.enums import BillStatus, PaymentMethod
 from app.models.order import PosBill, PosBillPayment
 from app.models.tenant import BusinessOwner
 from app.schemas.owner.settings import (
@@ -23,7 +23,12 @@ from app.schemas.owner.settings import (
 from app.services.owner.access import get_outlet_for_owner
 from app.services.owner.audit_service import TenantAuditService
 from app.services.owner.order_pricing import money
-from app.services.owner.permissions import PERM_OPS_DAY_CLOSE, PERM_OPS_DAY_REOPEN, has_permission
+from app.services.owner.permissions import (
+    PERM_DENIED_MESSAGE,
+    PERM_OPS_DAY_CLOSE,
+    PERM_OPS_DAY_REOPEN,
+    assert_permission,
+)
 from app.services.owner.sales_analytics_helpers import OUTLET_TZ
 
 
@@ -85,13 +90,14 @@ class DayCloseService:
         outlet_id: uuid.UUID,
         payload: OpenBusinessDayRequest,
     ) -> BusinessDayResponse:
-        if not has_permission(owner.role, PERM_OPS_DAY_CLOSE):
-            raise HTTPException(status_code=403, detail="No permission")
+        await assert_permission(self.db, owner, PERM_OPS_DAY_CLOSE, outlet_id)
         await get_outlet_for_owner(self.db, owner, outlet_id)
         day = await self._get_or_create_day(outlet_id, self._today())
         if day.status == "closed":
-            if not has_permission(owner.role, PERM_OPS_DAY_REOPEN):
-                raise HTTPException(status_code=403, detail="Day closed — owner required to reopen")
+            try:
+                await assert_permission(self.db, owner, PERM_OPS_DAY_REOPEN, outlet_id)
+            except HTTPException:
+                raise HTTPException(status_code=403, detail=PERM_DENIED_MESSAGE)
             day.status = "open"
             day.closed_at = None
             day.closed_by_owner_id = None
@@ -117,8 +123,7 @@ class DayCloseService:
         outlet_id: uuid.UUID,
         payload: CashMovementCreate,
     ) -> BusinessDayResponse:
-        if not has_permission(owner.role, PERM_OPS_DAY_CLOSE):
-            raise HTTPException(status_code=403, detail="No permission")
+        await assert_permission(self.db, owner, PERM_OPS_DAY_CLOSE, outlet_id)
         await get_outlet_for_owner(self.db, owner, outlet_id)
         day = await self._get_or_create_day(outlet_id, self._today())
         if day.status == "closed":
@@ -153,8 +158,7 @@ class DayCloseService:
         outlet_id: uuid.UUID,
         payload: CloseBusinessDayRequest,
     ) -> BusinessDayResponse:
-        if not has_permission(owner.role, PERM_OPS_DAY_CLOSE):
-            raise HTTPException(status_code=403, detail="No permission")
+        await assert_permission(self.db, owner, PERM_OPS_DAY_CLOSE, outlet_id)
         await get_outlet_for_owner(self.db, owner, outlet_id)
         day = await self._get_or_create_day(outlet_id, self._today())
         if day.status == "closed":

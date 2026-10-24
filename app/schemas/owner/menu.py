@@ -30,7 +30,7 @@ class MenuCategoryResponse(BaseModel):
 
 class MenuVariationInput(BaseModel):
     name: str = Field(min_length=1, max_length=128)
-    price: Decimal = Field(ge=0)
+    price: Decimal = Field(default=Decimal("0"), ge=0)
     sort_order: int = 0
     is_default: bool = False
     is_available: bool = True
@@ -39,6 +39,7 @@ class MenuVariationInput(BaseModel):
         default=None,
         description="Null = same as menu item",
     )
+    children: list["MenuVariationInput"] = Field(default_factory=list)
 
 
 class MenuAddonInput(BaseModel):
@@ -53,6 +54,20 @@ class MenuAddonInput(BaseModel):
     )
 
 
+class MenuAddonGroupInput(BaseModel):
+    name: str = Field(default="Toppings", min_length=1, max_length=128)
+    min_select: int = Field(default=0, ge=0, le=20)
+    max_select: Optional[int] = Field(default=None, ge=1, le=40)
+    sort_order: int = 0
+    addons: list[MenuAddonInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def max_gte_min(self) -> "MenuAddonGroupInput":
+        if self.max_select is not None and self.max_select < self.min_select:
+            raise ValueError("max_select cannot be less than min_select")
+        return self
+
+
 class MenuVariationResponse(BaseModel):
     id: UUID
     name: str
@@ -62,6 +77,8 @@ class MenuVariationResponse(BaseModel):
     is_available: bool = True
     weight_grams: int | None = None
     food_type: FoodType | None = None
+    parent_id: UUID | None = None
+    children: list["MenuVariationResponse"] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -74,6 +91,18 @@ class MenuAddonResponse(BaseModel):
     is_available: bool
     weight_grams: int | None = None
     food_type: FoodType | None = None
+    group_id: UUID | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class MenuAddonGroupResponse(BaseModel):
+    id: UUID
+    name: str
+    min_select: int = 0
+    max_select: Optional[int] = None
+    sort_order: int = 0
+    addons: list[MenuAddonResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -93,6 +122,7 @@ class MenuItemCreate(BaseModel):
     sgst_percent: Decimal = Field(default=Decimal("2.5"), ge=0, le=28)
     variations: list[MenuVariationInput] = Field(default_factory=list)
     addons: list[MenuAddonInput] = Field(default_factory=list)
+    addon_groups: list[MenuAddonGroupInput] = Field(default_factory=list)
 
 
 class MenuItemUpdate(BaseModel):
@@ -113,12 +143,7 @@ class MenuItemUpdate(BaseModel):
 class MenuItemModifiersUpdate(BaseModel):
     variations: list[MenuVariationInput] = Field(default_factory=list)
     addons: list[MenuAddonInput] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def default_variation_when_present(self) -> "MenuItemModifiersUpdate":
-        if self.variations and not any(v.is_default for v in self.variations):
-            self.variations[0].is_default = True
-        return self
+    addon_groups: list[MenuAddonGroupInput] = Field(default_factory=list)
 
 
 class MenuItemResponse(BaseModel):
@@ -138,5 +163,6 @@ class MenuItemResponse(BaseModel):
     sgst_percent: Decimal = Decimal("0")
     variations: list[MenuVariationResponse] = Field(default_factory=list)
     addons: list[MenuAddonResponse] = Field(default_factory=list)
+    addon_groups: list[MenuAddonGroupResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

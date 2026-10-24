@@ -14,10 +14,11 @@ from app.services.owner.order_pricing import (
 
 
 def test_gst_default_tax_when_registered():
-    assert default_tax_percent_for_business(True, "22AAAAA0000A1Z5") == Decimal("5.00")
+    """GSTIN is identity only — it never auto-includes tax on a bill."""
+    assert default_tax_percent_for_business(True, "22AAAAA0000A1Z5") == Decimal("0")
     assert default_tax_percent_for_business(False, None) == Decimal("0")
-    assert resolve_tax_percent(True, "22AAAAA0000A1Z5", Decimal("0")) == Decimal("5.00")
-    assert resolve_tax_percent(True, "22AAAAA0000A1Z5", Decimal("12")) == Decimal("12.00")
+    assert resolve_tax_percent(True, "22AAAAA0000A1Z5", Decimal("0")) == Decimal("0")
+    assert resolve_tax_percent(True, "22AAAAA0000A1Z5", Decimal("12")) == Decimal("0")
 
 
 def test_compute_bill_with_discount_percent_and_tax():

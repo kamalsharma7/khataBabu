@@ -28,7 +28,7 @@ from app.schemas.owner.auth import (
 logger = logging.getLogger(__name__)
 
 
-from app.services.owner.permissions import permissions_for_role  # noqa: F401 — re-exported for tests
+from app.services.owner.permissions import is_manager, permissions_for_role
 
 
 class OwnerAuthService:
@@ -95,6 +95,7 @@ class OwnerAuthService:
             must_change_password=owner.must_change_password,
             role=owner.role.value,
             permissions=permissions_for_role(owner.role),
+            can_manage_permissions=is_manager(owner.role),
             support_contact_name=support_name,
             support_contact_mobile=support_mobile,
         )

@@ -39,6 +39,7 @@ class OwnerProfileResponse(BaseModel):
     must_change_password: bool
     role: str = "owner"
     permissions: list[str] = Field(default_factory=list)
+    can_manage_permissions: bool = False
     support_contact_name: str | None = None
     support_contact_mobile: str | None = None
 
